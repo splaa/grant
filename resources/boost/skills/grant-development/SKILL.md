@@ -17,10 +17,10 @@ Apply `shipfastlabs/grant` while keeping every authorization check in Laravel's 
 
 ## Workflow
 
-1. Install with `composer require shipfastlabs/grant`, then `php artisan grant:install` and `dbmate up`. Pass `--key-type=uuid|ulid` for string-keyed users.
+1. Install with `composer require shipfastlabs/grant`, then `php artisan grant:install`, `php artisan migrate`, and `dbmate up` (dbmate reads `DATABASE_URL`). Pass `--key-type=uuid|ulid` for string-keyed users (defaults to `grant.key_type`). The SQL follows the `grant.connection` driver (sqlite, mysql/mariadb, pgsql); re-running keeps the existing migration unless `--force` is passed.
 2. Define string-backed `App\Enums\Permission` cases implementing `Shipfastlabs\Grant\Ability` and denial messages.
 3. Adjust the generated string-backed `App\Enums\Role` implementing `Shipfastlabs\Grant\Role`. It ships with `Admin` mapped to all permissions and `Member` mapped to none.
-4. Make the auth user a Doctrine entity listed in `grant.entities`, add `Shipfastlabs\Grant\HasRoles` and `Shipfastlabs\Grant\Auth\Authenticatable`, and set `auth.providers.users.driver` to `doctrine` with `model` pointing at the entity.
+4. Make the auth user a Doctrine entity listed in `grant.entities` with a `getId()` method, add `Shipfastlabs\Grant\HasRoles`, `Shipfastlabs\Grant\Auth\Authenticatable`, and Laravel's `Illuminate\Foundation\Auth\Access\Authorizable` (for `$user->can()`), and set `auth.providers.users.driver` to `doctrine` with `model` pointing at the entity.
 5. Assign with `grant`, `revoke`, or `syncRoles`; the user must be persisted, and `on:` accepts a persisted entity implementing `Shipfastlabs\Grant\Scope` (use the `Shipfastlabs\Grant\Concerns\IsScope` trait — class name as type, `getId()` as id — for the default implementation).
 6. Check only with `can()`, `Gate`, `@can`, `can:` middleware, Form Requests, or Policies.
 7. Use `#[Requires(Permission::...)]` on a policy method when capability and model-context checks should compose; a denial carries that permission's `deniedMessage()`.
@@ -56,6 +56,9 @@ For tests, add `Shipfastlabs\Grant\Testing\InteractsWithGrant` to the base test 
 - Do not put ownership or model-state rules in role definitions; keep them in Policies.
 - Do not build Eloquent relationships against `RoleAssignment`; it is a Doctrine entity, so resolve users and scopes with `EntityManager::find($class, $id)`.
 - Assignments are memoized per user for the request (scoped binding). Doctrine lifecycle subscribers clear the memo on writes; after DQL or raw bulk writes call `Grant::flush($user)`.
-- Keep `grant.key_type`, the user primary key type, and the dbmate migration in sync.
+- Keep `grant.key_type`, the user primary key type, and the dbmate migration in sync; `scopeable_id` shares that type.
+- Grant's entity manager runs on the PDO of the `grant.connection` Laravel connection: `DB::transaction()` and `RefreshDatabase` cover its writes and SQLite `:memory:` is shared. `migrate:fresh` drops the dbmate `role_assignments` table, so recreate it in `afterRefreshingDatabase()` as the README shows.
+- Resolve Grant's manager as `grant.entity_manager`; `EntityManagerInterface` belongs to laravel-doctrine/orm when it is installed. Its transactions use another connection, so commit them before granting roles or use `DB::transaction()`.
+- Do not call role methods on a `new` entity before it is persisted or loaded through Doctrine; it throws `UnsavedEntityException`.
 - The super-admin bypass only applies to the role granted globally, never scoped.
 - No admin plugin: manage roles in Filament with a multiple `Select` bound to `roles()` and `syncRoles()`; see the README section.

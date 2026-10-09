@@ -73,7 +73,7 @@ final class InstallCommand extends Command
         $this->components->bulletList([
             'Add `Shipfastlabs\Grant\HasRoles`, `Shipfastlabs\Grant\Auth\Authenticatable`, and Laravel\'s `Authorizable` to your Doctrine user entity.',
             'Set `auth.providers.users.model` to that entity and `auth.providers.users.driver` to `doctrine`.',
-            'Run `dbmate up` to create the role_assignments table.',
+            'Run `php artisan migrate`, then `dbmate up` with `DATABASE_URL` set, to create the role_assignments table.',
         ]);
 
         return self::SUCCESS;
