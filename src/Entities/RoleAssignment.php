@@ -13,15 +13,10 @@ use Doctrine\ORM\Mapping as ORM;
     name: 'role_assignments_user_role_scope_unique',
     columns: ['user_id', 'role', 'scopeable_type', 'scopeable_id'],
 )]
-#[ORM\UniqueConstraint(
-    name: 'role_assignments_user_role_global_unique',
-    columns: ['user_id', 'role'],
-    options: ['where' => 'scopeable_type IS NULL'],
-)]
 class RoleAssignment
 {
     #[ORM\Id]
-    #[ORM\Column(type: 'integer')]
+    #[ORM\Column(type: 'bigint', options: ['unsigned' => true])]
     #[ORM\GeneratedValue]
     private ?int $id = null;
 

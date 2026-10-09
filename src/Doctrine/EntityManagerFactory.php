@@ -9,7 +9,11 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Events;
 use Doctrine\ORM\Mapping\Driver\AttributeDriver;
+use Doctrine\ORM\Tools\ToolEvents;
+use Doctrine\Persistence\Mapping\Driver\MappingDriver;
+use Doctrine\Persistence\Mapping\Driver\MappingDriverChain;
 use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Database\Connection;
@@ -21,6 +25,8 @@ use Shipfastlabs\Grant\Listeners\InjectGrantService;
 
 final readonly class EntityManagerFactory
 {
+    private const string ENTITY_NAMESPACE = 'Shipfastlabs\\Grant\\Entities';
+
     /** @var array<string, string> */
     private const array DBAL_DRIVERS = [
         'mysql' => 'pdo_mysql',
@@ -45,11 +51,6 @@ final readonly class EntityManagerFactory
         $configuration->enableNativeLazyObjects(true);
         $configuration->setMiddlewares([new LaravelConnectionMiddleware($connection)]);
 
-        $eventManager = new EventManager;
-        $eventManager->addEventSubscriber(new ConfigureRoleAssignmentMapping($this->config));
-        $eventManager->addEventSubscriber(new FlushGrantMemo($this->container));
-        $eventManager->addEventSubscriber(new InjectGrantService($this->container));
-
         $driver = $connection->getDriverName();
 
         $dbal = DriverManager::getConnection(
@@ -57,7 +58,53 @@ final readonly class EntityManagerFactory
             $configuration,
         );
 
-        return new EntityManager($dbal, $configuration, $eventManager);
+        return $this->attach(new EntityManager($dbal, $configuration, new EventManager));
+    }
+
+    public function attach(EntityManagerInterface $entityManager): EntityManagerInterface
+    {
+        $eventManager = $entityManager->getEventManager();
+        $attached = array_filter(
+            $eventManager->getListeners(ToolEvents::postGenerateSchema),
+            static fn (object $listener): bool => $listener instanceof ConfigureRoleAssignmentMapping,
+        );
+
+        if ($attached !== []) {
+            return $entityManager;
+        }
+
+        $configuration = $entityManager->getConfiguration();
+        $configuration->setMetadataDriverImpl($this->withGrantEntities($configuration->getMetadataDriverImpl()));
+
+        $eventManager->addEventSubscriber(new ConfigureRoleAssignmentMapping($this->config));
+        $eventManager->addEventSubscriber(new FlushGrantMemo($this->container));
+
+        $injected = array_filter(
+            $eventManager->getListeners(Events::postLoad),
+            static fn (object $listener): bool => $listener instanceof InjectGrantService,
+        );
+
+        if ($injected === []) {
+            $eventManager->addEventSubscriber(new InjectGrantService($this->container));
+        }
+
+        return $entityManager;
+    }
+
+    private function withGrantEntities(?MappingDriver $driver): MappingDriverChain
+    {
+        $chain = match (true) {
+            $driver instanceof MappingDriverChain => $driver,
+            default => new MappingDriverChain,
+        };
+
+        if ($driver instanceof MappingDriver && $chain !== $driver) {
+            $chain->setDefaultDriver($driver);
+        }
+
+        $chain->addDriver(new AttributeDriver([__DIR__.'/../Entities']), self::ENTITY_NAMESPACE);
+
+        return $chain;
     }
 
     /** @return list<string> */
@@ -65,7 +112,6 @@ final readonly class EntityManagerFactory
     {
         $paths = $this->config->get('grant.entities', []);
         $paths = is_array($paths) ? $paths : [];
-        $paths[] = __DIR__.'/../Entities';
 
         return array_values(array_unique(array_filter(
             $paths,

@@ -7,6 +7,7 @@ namespace Shipfastlabs\Grant;
 use Closure;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Events;
+use Doctrine\Persistence\ManagerRegistry;
 use Illuminate\Auth\Access\Response;
 use Illuminate\Auth\AuthManager;
 use Illuminate\Contracts\Auth\Access\Gate;
@@ -14,9 +15,11 @@ use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Hashing\Hasher;
+use Illuminate\Database\ConnectionResolverInterface;
 use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use LaravelDoctrine\ORM\DoctrineServiceProvider as LaravelDoctrineServiceProvider;
 use ReflectionMethod;
 use Shipfastlabs\Grant\Auth\DoctrineUserProvider;
 use Shipfastlabs\Grant\Console\Commands\InstallCommand;
@@ -33,6 +36,8 @@ final class GrantServiceProvider extends ServiceProvider
 {
     public const string ENTITY_MANAGER = 'grant.entity_manager';
 
+    private const string OWN_ENTITY_MANAGER = 'grant.entity_manager.own';
+
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/grant.php', 'grant');
@@ -40,28 +45,25 @@ final class GrantServiceProvider extends ServiceProvider
         $this->app->scoped(AssignmentMemo::class);
         $this->app->scoped(Grant::class);
 
-        $this->app->scoped(
-            self::ENTITY_MANAGER,
-            fn (Application $app): EntityManagerInterface => new EntityManagerFactory($this->config(), $app->make('db'), $app)->make(),
-        );
+        $this->app->scoped(self::OWN_ENTITY_MANAGER, fn (): EntityManagerInterface => $this->factory()->make());
 
-        $this->app->when(Grant::class)
-            ->needs(EntityManagerInterface::class)
-            ->give(fn (): EntityManagerInterface => $this->entityManager());
+        $this->app->bind(self::ENTITY_MANAGER, fn (): EntityManagerInterface => match ($this->managerSource()) {
+            null => $this->ownEntityManager(),
+            default => $this->factory()->attach($this->sourceManager()),
+        });
 
-        $this->app->afterResolving(EntityManagerInterface::class, function (EntityManagerInterface $entityManager): void {
-            $eventManager = $entityManager->getEventManager();
-            $subscribed = array_filter($eventManager->getListeners(Events::postLoad), static fn (object $listener): bool => $listener instanceof InjectGrantService);
-
-            if ($subscribed === []) {
-                $eventManager->addEventSubscriber(new InjectGrantService($this->app));
-            }
+        $this->app->afterResolving(function (mixed $resolved): void {
+            match (true) {
+                ! $resolved instanceof EntityManagerInterface => null,
+                $this->isSourceManager($resolved) => $this->factory()->attach($resolved),
+                default => $this->injectGrantService($resolved),
+            };
         });
 
         $this->app->booting(function (): void {
-            match ($this->app->bound(EntityManagerInterface::class)) {
-                true => null,
-                false => $this->app->alias(self::ENTITY_MANAGER, EntityManagerInterface::class),
+            match ($this->managerSource() === null && ! $this->app->bound(EntityManagerInterface::class)) {
+                true => $this->app->alias(self::ENTITY_MANAGER, EntityManagerInterface::class),
+                false => null,
             };
         });
     }
@@ -74,8 +76,15 @@ final class GrantServiceProvider extends ServiceProvider
             $this->registerGate($permissions);
         }
 
-        $this->registerAuthProvider();
-        $this->forgetRolledBackAssignments();
+        match ($this->managerSource()) {
+            null => $this->forgetRolledBackAssignments(),
+            default => null,
+        };
+
+        match ($this->managerSource() !== null && $this->app->bound(ManagerRegistry::class) && class_exists(LaravelDoctrineServiceProvider::class)) {
+            true => null,
+            false => $this->registerAuthProvider(),
+        };
 
         if ($this->app->runningInConsole()) {
             $this->registerCommands();
@@ -91,6 +100,67 @@ final class GrantServiceProvider extends ServiceProvider
         return $config;
     }
 
+    private function managerSource(): ?string
+    {
+        $source = $this->config()->get('grant.entity_manager');
+
+        return is_string($source) && $source !== '' ? $source : null;
+    }
+
+    private function factory(): EntityManagerFactory
+    {
+        /** @var ConnectionResolverInterface $connections */
+        $connections = $this->app->make('db');
+
+        return new EntityManagerFactory($this->config(), $connections, $this->app);
+    }
+
+    private function sourceManager(): EntityManagerInterface
+    {
+        $source = (string) $this->managerSource();
+
+        $manager = match (true) {
+            $this->app->bound($source) => $this->app->make($source),
+            $this->app->bound(ManagerRegistry::class) => $this->registry()->getManager($source),
+            default => throw InvalidConfigurationException::entityManager($source),
+        };
+
+        return match (true) {
+            $manager instanceof EntityManagerInterface => $manager,
+            default => throw InvalidConfigurationException::entityManager($source),
+        };
+    }
+
+    private function isSourceManager(EntityManagerInterface $entityManager): bool
+    {
+        $source = $this->managerSource();
+
+        return match (true) {
+            $source === null => false,
+            $this->app->bound($source) => $this->app->isShared($this->app->getAlias($source)) && $this->app->make($source) === $entityManager,
+            $this->app->bound(ManagerRegistry::class) => array_key_exists($source, $this->registry()->getManagerNames()) && $this->registry()->getManager($source) === $entityManager,
+            default => false,
+        };
+    }
+
+    private function registry(): ManagerRegistry
+    {
+        /** @var ManagerRegistry $registry */
+        $registry = $this->app->make(ManagerRegistry::class);
+
+        return $registry;
+    }
+
+    private function injectGrantService(EntityManagerInterface $entityManager): void
+    {
+        $eventManager = $entityManager->getEventManager();
+        $injected = array_filter($eventManager->getListeners(Events::postLoad), static fn (object $listener): bool => $listener instanceof InjectGrantService);
+
+        if ($injected === []) {
+            $eventManager->addEventSubscriber(new InjectGrantService($this->app));
+        }
+    }
+
     private function entityManager(): EntityManagerInterface
     {
         /** @var EntityManagerInterface $entityManager */
@@ -99,14 +169,22 @@ final class GrantServiceProvider extends ServiceProvider
         return $entityManager;
     }
 
+    private function ownEntityManager(): EntityManagerInterface
+    {
+        /** @var EntityManagerInterface $entityManager */
+        $entityManager = $this->app->make(self::OWN_ENTITY_MANAGER);
+
+        return $entityManager;
+    }
+
     private function forgetRolledBackAssignments(): void
     {
         $this->app->make(Dispatcher::class)->listen(TransactionRolledBack::class, function (): void {
-            if (! $this->app->resolved(self::ENTITY_MANAGER)) {
+            if (! $this->app->resolved(self::OWN_ENTITY_MANAGER)) {
                 return;
             }
 
-            $entityManager = $this->entityManager();
+            $entityManager = $this->ownEntityManager();
 
             foreach ($entityManager->getUnitOfWork()->getIdentityMap()[RoleAssignment::class] ?? [] as $assignment) {
                 $entityManager->detach($assignment);

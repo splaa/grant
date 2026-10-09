@@ -6,6 +6,7 @@ namespace Shipfastlabs\Grant;
 
 use Doctrine\ORM\EntityManagerInterface;
 use Illuminate\Contracts\Config\Repository;
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Support\Collection;
 use ReflectionEnum;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
@@ -18,7 +19,7 @@ use Shipfastlabs\Grant\Internal\Identity;
 final readonly class Grant
 {
     public function __construct(
-        private EntityManagerInterface $entityManager,
+        private Container $container,
         private AssignmentMemo $memo,
         private Repository $config,
     ) {}
@@ -30,8 +31,8 @@ final readonly class Grant
         $userId = $this->userId($user);
 
         if (! $this->repository()->existsFor($userId, $role->value, $on)) {
-            $this->entityManager->persist(new RoleAssignment($userId, $role->value, $on?->scopeType(), $on?->scopeId()));
-            $this->entityManager->flush();
+            $this->entityManager()->persist(new RoleAssignment($userId, $role->value, $on?->scopeType(), $on?->scopeId()));
+            $this->entityManager()->flush();
         }
 
         $this->flush($user);
@@ -45,11 +46,11 @@ final readonly class Grant
 
         foreach ($this->repository()->findForUserAndScope($this->userId($user), $on) as $assignment) {
             if ($assignment->getRole() === $role->value) {
-                $this->entityManager->remove($assignment);
+                $this->entityManager()->remove($assignment);
             }
         }
 
-        $this->entityManager->flush();
+        $this->entityManager()->flush();
         $this->flush($user);
 
         return $user;
@@ -67,16 +68,16 @@ final readonly class Grant
             $known[$role->value] = $role->value;
         }
 
-        $this->entityManager->wrapInTransaction(function () use ($userId, $known, $on): void {
+        $this->entityManager()->wrapInTransaction(function () use ($userId, $known, $on): void {
             foreach ($this->repository()->findForUserAndScope($userId, $on) as $assignment) {
                 if (! in_array($assignment->getRole(), $known, true)) {
-                    $this->entityManager->remove($assignment);
+                    $this->entityManager()->remove($assignment);
                 }
             }
 
             foreach ($known as $value) {
                 if (! $this->repository()->existsFor($userId, $value, $on)) {
-                    $this->entityManager->persist(new RoleAssignment($userId, $value, $on?->scopeType(), $on?->scopeId()));
+                    $this->entityManager()->persist(new RoleAssignment($userId, $value, $on?->scopeType(), $on?->scopeId()));
                 }
             }
         });
@@ -134,7 +135,7 @@ final readonly class Grant
 
     public function isPersisted(object $entity): bool
     {
-        return Identity::isPersisted($this->entityManager, $entity);
+        return Identity::isPersisted($this->entityManager(), $entity);
     }
 
     /** @return class-string<Role> */
@@ -180,7 +181,7 @@ final readonly class Grant
 
     private function userId(object $user): int|string
     {
-        $id = Identity::id($this->entityManager, $user);
+        $id = Identity::id($this->entityManager(), $user);
 
         if ($id === null) {
             throw UnsavedEntityException::user();
@@ -197,27 +198,37 @@ final readonly class Grant
     /** @return Collection<int, RoleAssignment> */
     private function assignments(object $user): Collection
     {
-        return $this->memo->remember(
-            $this->memoKey($user),
-            fn (): Collection => collect($this->repository()->findForUser($this->userId($user))),
-        );
+        $load = fn (): Collection => collect($this->repository()->findForUser($this->userId($user)));
+
+        return match ($this->entityManager()->getConnection()->isTransactionActive()) {
+            true => $load(),
+            false => $this->memo->remember($this->memoKey($user), $load),
+        };
+    }
+
+    private function entityManager(): EntityManagerInterface
+    {
+        /** @var EntityManagerInterface $entityManager */
+        $entityManager = $this->container->make(GrantServiceProvider::ENTITY_MANAGER);
+
+        return $entityManager;
     }
 
     private function repository(): RoleAssignmentRepository
     {
         /** @var RoleAssignmentRepository $repository */
-        $repository = $this->entityManager->getRepository(RoleAssignment::class);
+        $repository = $this->entityManager()->getRepository(RoleAssignment::class);
 
         return $repository;
     }
 
     private function assertPersisted(object $user, ?Scope $on): void
     {
-        if (! Identity::isPersisted($this->entityManager, $user)) {
+        if (! Identity::isPersisted($this->entityManager(), $user)) {
             throw UnsavedEntityException::user();
         }
 
-        if ($on instanceof Scope && ! Identity::isPersisted($this->entityManager, $on)) {
+        if ($on instanceof Scope && ! Identity::isPersisted($this->entityManager(), $on)) {
             throw UnsavedEntityException::scope();
         }
     }

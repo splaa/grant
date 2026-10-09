@@ -26,6 +26,9 @@ abstract class TestCase extends Orchestra
     /** @var list<class-string<ServiceProvider>> */
     protected array $packageProviders = [GrantServiceProvider::class];
 
+    /** @var array<string, mixed> */
+    protected array $configOverrides = [];
+
     protected function defineEnvironment($app): void
     {
         $app['config']->set('database.default', 'testing');
@@ -44,14 +47,33 @@ abstract class TestCase extends Orchestra
         $app->useAppPath($sandbox.DIRECTORY_SEPARATOR.'app');
         $app->useConfigPath($sandbox.DIRECTORY_SEPARATOR.'config');
         $app->useDatabasePath($sandbox.DIRECTORY_SEPARATOR.'database');
+
+        foreach ($this->configOverrides as $key => $value) {
+            $app['config']->set($key, $value);
+        }
     }
 
-    /** @param  list<class-string<ServiceProvider>>  $providers */
-    protected function bootWithProviders(array $providers): void
+    /**
+     * @param  list<class-string<ServiceProvider>>  $providers
+     * @param  array<string, mixed>  $config
+     */
+    protected function bootWithProviders(array $providers, array $config = []): void
     {
         $this->packageProviders = $providers;
+        $this->configOverrides = $config;
         $this->refreshApplication();
         $this->defineDatabaseMigrations();
+    }
+
+    /**
+     * @param  array<string, mixed>  $config
+     * @param  list<class-string<ServiceProvider>>  $providers
+     */
+    public function refreshWithConfig(array $config, array $providers = [GrantServiceProvider::class]): void
+    {
+        $this->packageProviders = $providers;
+        $this->configOverrides = $config;
+        $this->refreshApplication();
     }
 
     protected function defineDatabaseMigrations(): void
