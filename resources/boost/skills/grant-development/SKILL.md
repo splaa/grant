@@ -17,7 +17,7 @@ Apply `shipfastlabs/grant` while keeping every authorization check in Laravel's 
 
 ## Workflow
 
-1. Install with `composer require shipfastlabs/grant`, then `php artisan grant:install`, `php artisan migrate`, and `dbmate up` (dbmate reads `DATABASE_URL`). Pass `--key-type=uuid|ulid` for string-keyed users (defaults to `grant.key_type`). The SQL follows the `grant.connection` driver (sqlite, mysql/mariadb, pgsql); re-running keeps the existing migration unless `--force` is passed.
+1. Install with `composer require shipfastlabs/grant`, then `php artisan grant:install`, `php artisan migrate`, and `dbmate up` (dbmate reads `DATABASE_URL`). Pass `--key-type=uuid|ulid` for string-keyed users (defaults to `grant.key_type`). The SQL follows the `grant.connection` driver (sqlite, mysql/mariadb, pgsql); re-running keeps the existing migration unless `--force` is passed. When the app already registers a Doctrine `ManagerRegistry` or `EntityManagerInterface`, the command offers to share it, writes `grant.entity_manager`, and skips dbmate in favour of `php artisan doctrine:schema:update --force` or `doctrine:migrations:diff`.
 2. Define string-backed `App\Enums\Permission` cases implementing `Shipfastlabs\Grant\Ability` and denial messages.
 3. Adjust the generated string-backed `App\Enums\Role` implementing `Shipfastlabs\Grant\Role`. It ships with `Admin` mapped to all permissions and `Member` mapped to none.
 4. Make the auth user a Doctrine entity listed in `grant.entities` with a `getId()` method, add `Shipfastlabs\Grant\HasRoles`, `Shipfastlabs\Grant\Auth\Authenticatable`, and Laravel's `Illuminate\Foundation\Auth\Access\Authorizable` (for `$user->can()`), and set `auth.providers.users.driver` to `doctrine` with `model` pointing at the entity.
@@ -27,7 +27,7 @@ Apply `shipfastlabs/grant` while keeping every authorization check in Laravel's 
 
 ## References
 
-- `config/grant.php` — enum classes, super-admin role, `entities`, `connection`, `key_type`, and the `dbmate_path` for the shipped migration
+- `config/grant.php` — enum classes, super-admin role, `entities`, `connection`, `entity_manager` (`null`, a container key/class, or a `ManagerRegistry` manager name), `key_type`, and the `dbmate_path` for the shipped migration
 - `app/Enums/Permission.php` and `app/Enums/Role.php` — application definitions
 - `php artisan grant:list` — registered permissions
 - `php artisan grant:show {user} --on='EntityClass:id'` — resolved assignments
@@ -58,7 +58,8 @@ For tests, add `Shipfastlabs\Grant\Testing\InteractsWithGrant` to the base test 
 - Assignments are memoized per user for the request (scoped binding). Doctrine lifecycle subscribers clear the memo on writes; after DQL or raw bulk writes call `Grant::flush($user)`.
 - Keep `grant.key_type`, the user primary key type, and the dbmate migration in sync; `scopeable_id` shares that type.
 - Grant's entity manager runs on the PDO of the `grant.connection` Laravel connection: `DB::transaction()` and `RefreshDatabase` cover its writes and SQLite `:memory:` is shared. `migrate:fresh` drops the dbmate `role_assignments` table, so recreate it in `afterRefreshingDatabase()` as the README shows.
-- Resolve Grant's manager as `grant.entity_manager`; `EntityManagerInterface` belongs to laravel-doctrine/orm when it is installed. Its transactions use another connection, so commit them before granting roles or use `DB::transaction()`.
+- Resolve Grant's manager as `grant.entity_manager`; `EntityManagerInterface` belongs to laravel-doctrine/orm when it is installed. With `entity_manager` null, laravel-doctrine's transactions use another connection, so commit them before granting roles or use `DB::transaction()`; set `entity_manager` to the manager name to share one connection, identity map, and transaction.
+- When sharing a manager, do not add Grant's entity path or subscribers to `config/doctrine.php`; Grant attaches them itself. Keep laravel-doctrine's `doctrine` auth driver.
 - Do not call role methods on a `new` entity before it is persisted or loaded through Doctrine; it throws `UnsavedEntityException`.
 - The super-admin bypass only applies to the role granted globally, never scoped.
 - No admin plugin: manage roles in Filament with a multiple `Select` bound to `roles()` and `syncRoles()`; see the README section.

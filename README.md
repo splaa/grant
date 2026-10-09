@@ -48,7 +48,7 @@ DATABASE_URL="sqlite:database/database.sqlite"
 
 dbmate also writes `db/schema.sql` after migrating; commit it or pass `--no-dump-schema`.
 
-`grant:install` publishes the config and writes a dbmate migration into `db/migrations`, and creates starter `app/Enums/Permission.php` and `app/Enums/Role.php` enums if you don't have them yet. The SQL dialect follows the driver of `grant.connection` (or your default connection): SQLite, MySQL/MariaDB, or PostgreSQL. Pass `--key-type=uuid` or `--key-type=ulid` when your user entity uses string keys (it defaults to `grant.key_type`), and `--migrate` to run `dbmate up` for you when the binary is available. Running the command again keeps the existing migration; add `--force` to rewrite it and the published config.
+`grant:install` publishes the config and writes a dbmate migration into `db/migrations`, and creates starter `app/Enums/Permission.php` and `app/Enums/Role.php` enums if you don't have them yet. When your application already registers a Doctrine `EntityManager`, the command offers to share it instead and skips the dbmate migration; see [Sharing an Existing EntityManager](#sharing-an-existing-entitymanager). The SQL dialect follows the driver of `grant.connection` (or your default connection): SQLite, MySQL/MariaDB, or PostgreSQL. Pass `--key-type=uuid` or `--key-type=ulid` when your user entity uses string keys (it defaults to `grant.key_type`), and `--migrate` to run `dbmate up` for you when the binary is available. Running the command again keeps the existing migration; add `--force` to rewrite it and the published config.
 
 The migration adds a foreign key from `role_assignments.user_id` to `users.id` with `ON DELETE CASCADE`. Edit the generated SQL if your users live in another table.
 
@@ -344,12 +344,13 @@ return [
     'super_admin' => null,
     'entities' => [app_path('Entities')],
     'connection' => null,
+    'entity_manager' => env('GRANT_ENTITY_MANAGER'),
     'key_type' => 'int',
     'dbmate_path' => 'db/migrations',
 ];
 ```
 
-`entities` lists the directories Doctrine scans for attribute-mapped entities; `connection` picks a Laravel database connection and defaults to your app default. `key_type` matches your user entity's primary key — `int` (default), `uuid` (36 chars), or `ulid` (26 chars). `grant:install` writes the matching SQL and config together; if you edit it by hand, keep the `role_assignments` columns and this value in sync.
+`entities` lists the directories Doctrine scans for attribute-mapped entities; `connection` picks a Laravel database connection and defaults to your app default. Both only apply to Grant's own `EntityManager`; `entity_manager` switches to one your application already registers (see [Sharing an Existing EntityManager](#sharing-an-existing-entitymanager)). `key_type` matches your user entity's primary key — `int` (default), `uuid` (36 chars), or `ulid` (26 chars). `grant:install` writes the matching SQL and config together; if you edit it by hand, keep the `role_assignments` columns and this value in sync.
 
 Grant supports a single user entity: the one set in `auth.providers.users.model`.
 
@@ -363,9 +364,29 @@ Grant's `EntityManager` runs on the PDO of the Laravel connection named in `gran
 
 Grant registers this manager under the `grant.entity_manager` container key. It is also bound as `Doctrine\ORM\EntityManagerInterface` unless another package already binds that interface. `grant`, `revoke`, and `syncRoles` call `flush()` on it, which also writes any other pending changes in the same manager.
 
-## Using with laravel-doctrine/orm
+## Sharing an Existing EntityManager
 
-Grant installs next to [laravel-doctrine/orm](https://github.com/laravel-doctrine/orm) without Composer conflicts, and keeps its own `EntityManager`:
+If your application already has a Doctrine `EntityManager`, from [laravel-doctrine/orm](https://github.com/laravel-doctrine/orm) or your own service provider, Grant can use it instead of building one. Set `grant.entity_manager` (or `GRANT_ENTITY_MANAGER`) to where that manager lives:
+
+| Value | Resolved as |
+|---|---|
+| `null` (default) | Grant builds its own manager on `grant.connection`. |
+| A container key or class, such as `em` or `Doctrine\ORM\EntityManagerInterface` | `app($value)` |
+| A manager name, such as `default` | `app(Doctrine\Persistence\ManagerRegistry::class)->getManager($value)` |
+
+`grant:install` looks for a `Doctrine\Persistence\ManagerRegistry` or an `EntityManagerInterface` binding that is not Grant's. It lists what it found, asks whether to share it (yes by default and with `--no-interaction`), asks which manager when the registry has several (the registry default without interaction), and writes the choice as the default of `env('GRANT_ENTITY_MANAGER', ...)` in `config/grant.php`. With nothing found, it keeps the dbmate setup above.
+
+When Grant shares a manager:
+
+- Grant adds the `RoleAssignment` mapping and its listeners to that manager's own metadata driver and `EventManager`. You do not add Grant to laravel-doctrine's `paths` or `events`. Managers that laravel-doctrine rebuilds after `resetManager()` get them too.
+- `role_assignments` belongs to your Doctrine schema tooling, so `grant:install` writes no dbmate migration. Run `php artisan doctrine:schema:update --force` or generate a migration with `php artisan doctrine:migrations:diff`. The generated table matches the dbmate migration: the same indexes, the global-role unique index (a partial index on PostgreSQL, a generated column on MySQL/MariaDB), and a cascading foreign key to your user entity's table, with `user_id` typed like that entity's identifier. SQLite cannot express the partial index through Doctrine, so there Grant relies on its own duplicate check, and `schema:update` against a database migrated with dbmate offers to drop the index.
+- One identity map and one connection: Doctrine transactions on the shared manager cover `grant`, `revoke`, and `syncRoles`. Inside a transaction Grant reads assignments from the database instead of its memo, so a rollback cannot leave stale roles behind.
+- With laravel-doctrine's `ManagerRegistry`, Grant does not register its `doctrine` auth driver; laravel-doctrine's `doctrine` driver works with the `Authenticatable` trait. With a plain container binding, Grant's driver stays and uses the shared manager.
+- `grant.connection` and `grant.entities` are ignored; the shared manager's own connection and mapping apply.
+
+### Running next to laravel-doctrine/orm with Grant's own manager
+
+With `entity_manager` left `null`, both packages install side by side without Composer conflicts, and Grant keeps its own `EntityManager`:
 
 - `EntityManagerInterface` stays laravel-doctrine's manager in either provider order; Grant uses `grant.entity_manager` internally.
 - Role methods work on users loaded through either manager. Grant attaches itself to laravel-doctrine's manager when it is resolved, but the two managers have separate identity maps, so the same row can be two different objects.
@@ -373,8 +394,6 @@ Grant installs next to [laravel-doctrine/orm](https://github.com/laravel-doctrin
 - Write role assignments through Grant (`grant`, `revoke`, `syncRoles`, or the facade). Rows written by laravel-doctrine's manager do not clear Grant's memo, so call `Grant::flush()` after them.
 - Both packages register a `doctrine` auth driver, and the provider registered last wins. Both work with the `Authenticatable` trait.
 - `RoleAssignment` is not in laravel-doctrine's entity paths, so `doctrine:schema:update` and `doctrine:migrations:diff` see `role_assignments` as an unknown table. Exclude it with a schema assets filter (for example `~^(?!role_assignments$)~`) and keep managing it with dbmate.
-
-Reusing laravel-doctrine's manager instead of Grant's own is not supported yet.
 
 ## Artisan Commands
 
