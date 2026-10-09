@@ -2,12 +2,11 @@
 
 declare(strict_types=1);
 
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Shipfastlabs\Grant\Entities\RoleAssignment;
 use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
-use Shipfastlabs\Grant\Exceptions\UnsavedModelException;
+use Shipfastlabs\Grant\Exceptions\UnsavedEntityException;
 use Shipfastlabs\Grant\Facades\Grant;
-use Shipfastlabs\Grant\Models\RoleAssignment;
 use Shipfastlabs\Grant\Tests\Fixtures\Permission;
 use Shipfastlabs\Grant\Tests\Fixtures\Post;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
@@ -15,7 +14,7 @@ use Shipfastlabs\Grant\Tests\Fixtures\Team;
 use Shipfastlabs\Grant\Tests\Fixtures\User;
 
 it('assigns, revokes, and synchronizes global roles', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
+    $user = $this->createUser('Taylor');
 
     $user->grant(Role::Editor)->grant(Role::Viewer);
 
@@ -29,93 +28,71 @@ it('assigns, revokes, and synchronizes global roles', function (): void {
     expect($user->roles()->all())->toBe([Role::Admin]);
 });
 
-it('exposes assignments as a relationship and removes them when the user is deleted', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $other = User::query()->create(['name' => 'Other']);
-    $team = Team::query()->create(['name' => 'Laravel']);
+it('exposes assignments and removes them when the user is deleted', function (): void {
+    $user = $this->createUser('Taylor');
+    $other = $this->createUser('Other');
+    $team = $this->createTeam('Laravel');
 
     $user->grant(Role::Editor)->grant(Role::Viewer, on: $team);
     $other->grant(Role::Editor);
 
-    expect($user->roleAssignments)->toHaveCount(2)
+    $assignments = $user->roleAssignments();
+    $scoped = collect($assignments)->firstWhere(static fn (RoleAssignment $row): bool => $row->getScopeableType() === Team::class);
+
+    expect($assignments)->toHaveCount(2)
         ->each->toBeInstanceOf(RoleAssignment::class)
-        ->and($user->roleAssignments->firstWhere('role', 'viewer')?->scopeable)->toBeInstanceOf(Team::class)
-        ->and($user->roleAssignments->first()?->user)->toBeInstanceOf(User::class);
+        ->and($scoped)->not->toBeNull()
+        ->and($this->em()->find(Team::class, $scoped?->getScopeableId()))->toBeInstanceOf(Team::class)
+        ->and($this->em()->find(User::class, $assignments[0]->getUserId()))->toBeInstanceOf(User::class);
 
-    $user->delete();
+    $this->em()->remove($user);
+    $this->em()->flush();
 
-    expect(RoleAssignment::query()->count())->toBe(1)
+    expect($this->em()->getRepository(RoleAssignment::class)->count([]))->toBe(1)
         ->and($other->roles()->all())->toBe([Role::Editor]);
 });
 
-it('uses the configured assignment model and rejects other classes', function (): void {
-    $model = new class extends RoleAssignment
-    {
-        protected $table = 'role_assignments';
-    };
-    config()->set('grant.model', $model::class);
-    $user = User::query()->create(['name' => 'Taylor']);
-
-    $user->grant(Role::Editor);
-
-    expect($user->roleAssignments()->first())->toBeInstanceOf($model::class)
-        ->and($user->roles()->all())->toBe([Role::Editor]);
-
-    config()->set('grant.model', Team::class);
-    Grant::flush();
-
-    expect(fn () => $user->roles())
-        ->toThrow(InvalidConfigurationException::class, 'grant.model');
-});
-
 it('keeps scoped roles separate and falls back to global permissions', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $firstTeam = Team::query()->create(['name' => 'First']);
-    $secondTeam = Team::query()->create(['name' => 'Second']);
+    $user = $this->createUser('Taylor');
+    $firstTeam = $this->createTeam('First');
+    $secondTeam = $this->createTeam('Second');
 
     $user->grant(Role::Viewer);
     $user->grant(Role::Editor, on: $firstTeam);
 
-    expect($user->roles(on: $firstTeam)->all())->toBe([Role::Editor])
-        ->and($user->roles(on: $secondTeam))->toBeEmpty()
-        ->and($user->permissions(on: $firstTeam)->all())->toEqualCanonicalizing(Permission::cases())
-        ->and($user->permissions(on: $secondTeam)->all())->toBe([Permission::ViewReports]);
+    expect($user->roles($firstTeam)->all())->toBe([Role::Editor])
+        ->and($user->roles($secondTeam))->toBeEmpty()
+        ->and($user->permissions($firstTeam)->all())->toEqualCanonicalizing(Permission::cases())
+        ->and($user->permissions($secondTeam)->all())->toBe([Permission::ViewReports]);
 });
 
-it('reads assignments once per request and forgets them on every write path', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $team = Team::query()->create(['name' => 'First']);
+it('memoizes assignments per user and only bulk writes require a manual flush', function (): void {
+    $user = $this->createUser('Taylor');
+    $team = $this->createTeam('First');
     $user->grant(Role::Viewer)->grant(Role::Editor, on: $team);
 
-    DB::enableQueryLog();
-    $user->roles();
-    DB::flushQueryLog();
-
     expect($user->roles()->all())->toBe([Role::Viewer])
-        ->and($user->roles(on: $team)->all())->toBe([Role::Editor])
+        ->and($user->roles($team)->all())->toBe([Role::Editor])
         ->and(Gate::forUser($user)->allows(Permission::EditPosts, $team))->toBeTrue()
-        ->and(User::query()->find($user->getKey())?->hasRole(Role::Viewer))->toBeTrue()
-        ->and(DB::getQueryLog())->toHaveCount(1);
+        ->and($this->em()->find(User::class, $user->getId())?->hasRole(Role::Viewer))->toBeTrue();
 
     $user->syncRoles([Role::Admin]);
     expect($user->roles()->all())->toBe([Role::Admin]);
 
-    RoleAssignment::query()->where('user_id', $user->getKey())->first()?->delete();
-    expect($user->roles())->toBeEmpty();
+    $this->em()->getConnection()->executeStatement(
+        'INSERT INTO role_assignments (user_id, role) VALUES (?, ?)',
+        [(int) $user->getId(), 'editor'],
+    );
 
-    RoleAssignment::query()->create(['user_id' => $user->getKey(), 'role' => 'editor']);
-    expect($user->roles()->all())->toBe([Role::Editor]);
-
-    RoleAssignment::query()->where('user_id', $user->getKey())->update(['role' => 'viewer']);
-    expect($user->roles()->all())->toBe([Role::Editor]);
+    expect($user->roles()->all())->toBe([Role::Admin]);
 
     Grant::flush($user);
-    expect($user->roles()->all())->toBe([Role::Viewer]);
+    expect($user->roles()->all())->toEqualCanonicalizing([Role::Admin, Role::Editor]);
 });
 
 it('registers native Gate abilities with denial messages and scoped resolution', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $team = Team::query()->create(['name' => 'First']);
+    $user = $this->createUser('Taylor');
+    $team = $this->createTeam('First');
     $user->grant(Role::Editor, on: $team);
 
     expect(Gate::forUser($user)->allows(Permission::EditPosts, $team))->toBeTrue()
@@ -123,25 +100,25 @@ it('registers native Gate abilities with denial messages and scoped resolution',
         ->and(Gate::forUser($user)->inspect(Permission::EditPosts)->message())->toBe('Editor access is required.');
 });
 
-it('denies instead of throwing for non-model gate arguments and unsaved models', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
+it('denies instead of throwing for non-entity gate arguments and unsaved entities', function (): void {
+    $user = $this->createUser('Taylor');
     $user->grant(Role::Viewer);
 
     expect(Gate::forUser($user)->allows(Permission::ViewReports, Post::class))->toBeTrue()
-        ->and(Gate::forUser($user)->allows(Permission::ViewReports, [new Team, 'extra']))->toBeTrue()
+        ->and(Gate::forUser($user)->allows(Permission::ViewReports, [new Team('Unsaved'), 'extra']))->toBeTrue()
         ->and(Gate::forUser($user)->allows(Permission::EditPosts, 5))->toBeFalse()
-        ->and(Gate::forUser(new User)->allows(Permission::ViewReports))->toBeFalse();
+        ->and(Gate::forUser(new User('Unsaved'))->allows(Permission::ViewReports))->toBeFalse();
 });
 
 it('rejects unsaved scopes', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
+    $user = $this->createUser('Taylor');
 
-    expect(fn () => $user->grant(Role::Editor, on: new Team))
-        ->toThrow(UnsavedModelException::class, 'persisted Eloquent model');
+    expect(fn () => $user->grant(Role::Editor, on: new Team('Unsaved')))
+        ->toThrow(UnsavedEntityException::class, 'persisted Doctrine entity');
 });
 
 it('supports facade assignments and test helpers', function (): void {
-    $user = User::factory()->create();
+    $user = $this->createUser('Taylor');
     Grant::grant($user, Role::Viewer);
     Grant::revoke($user, Role::Viewer);
 
@@ -153,50 +130,48 @@ it('supports facade assignments and test helpers', function (): void {
 
 it('allows a configured super admin before every other ability', function (): void {
     config()->set('grant.super_admin', Role::Admin);
-    $user = User::query()->create(['name' => 'Taylor']);
+    $user = $this->createUser('Taylor');
     $user->grant(Role::Admin);
 
     expect(Gate::forUser($user)->allows('undefined-ability'))->toBeTrue();
 });
 
 it('keeps Gate checks current after scoped instances are reset between jobs', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
+    $user = $this->createUser('Taylor');
     $user->grant(Role::Editor);
 
     expect(Gate::forUser($user)->allows(Permission::EditPosts))->toBeTrue();
 
-    app()->forgetScopedInstances();
+    $this->app?->forgetScopedInstances();
     $user->revoke(Role::Editor);
 
     expect(Gate::forUser($user)->allows(Permission::EditPosts))->toBeFalse();
 });
 
-it('writes through the assignment model and keeps unchanged rows when syncing', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
+it('writes through the entity manager and keeps unchanged rows when syncing', function (): void {
+    $user = $this->createUser('Taylor');
     $user->grant(Role::Editor)->grant(Role::Viewer);
-    $editorId = RoleAssignment::query()->where('role', 'editor')->value('id');
-    $deleted = [];
 
-    RoleAssignment::deleted(static function (RoleAssignment $assignment) use (&$deleted): void {
-        $deleted[] = $assignment->getAttribute('role');
-    });
+    $repository = $this->em()->getRepository(RoleAssignment::class);
+    $editorId = $repository->findOneBy(['role' => 'editor'])?->getId();
 
     $user->syncRoles([Role::Editor, Role::Admin]);
     $user->revoke(Role::Admin);
 
-    expect($deleted)->toBe(['viewer', 'admin'])
-        ->and(RoleAssignment::query()->where('role', 'editor')->value('id'))->toBe($editorId)
+    expect($repository->findOneBy(['role' => 'editor'])?->getId())->toBe($editorId)
         ->and($user->roles()->all())->toBe([Role::Editor]);
 });
 
 it('forgets the previous holder when an assignment moves to another user', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $other = User::query()->create(['name' => 'Other']);
+    $user = $this->createUser('Taylor');
+    $other = $this->createUser('Other');
     $user->grant(Role::Editor);
 
     expect($user->roles()->all())->toBe([Role::Editor]);
 
-    RoleAssignment::query()->where('user_id', $user->getKey())->firstOrFail()->update(['user_id' => $other->getKey()]);
+    $assignment = $this->em()->getRepository(RoleAssignment::class)->findOneBy(['userId' => $user->getId()]);
+    $assignment?->setUserId((int) $other->getId());
+    $this->em()->flush();
 
     expect($user->roles())->toBeEmpty()
         ->and($other->roles()->all())->toBe([Role::Editor]);
@@ -204,7 +179,7 @@ it('forgets the previous holder when an assignment moves to another user', funct
 
 it('rejects a super admin that is not a case of the role enum', function (): void {
     config()->set('grant.super_admin', 'admin');
-    $user = User::query()->create(['name' => 'Taylor']);
+    $user = $this->createUser('Taylor');
 
     expect(fn () => Gate::forUser($user)->allows(Permission::EditPosts))
         ->toThrow(InvalidConfigurationException::class, 'grant.super_admin');

@@ -4,34 +4,34 @@ declare(strict_types=1);
 
 namespace Shipfastlabs\Grant;
 
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\Model;
+use Doctrine\ORM\EntityManagerInterface;
+use Illuminate\Contracts\Config\Repository;
 use Illuminate\Support\Collection;
 use ReflectionEnum;
+use Shipfastlabs\Grant\Entities\RoleAssignment;
+use Shipfastlabs\Grant\Entities\RoleAssignmentRepository;
 use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
-use Shipfastlabs\Grant\Exceptions\UnsavedModelException;
-use Shipfastlabs\Grant\Models\RoleAssignment;
+use Shipfastlabs\Grant\Exceptions\UnsavedEntityException;
+use Shipfastlabs\Grant\Internal\AssignmentMemo;
+use Shipfastlabs\Grant\Internal\Identity;
 
-final class Grant
+final readonly class Grant
 {
-    /**
-     * @var array<string, Collection<int, RoleAssignment>>
-     */
-    private array $assignments = [];
+    public function __construct(
+        private EntityManagerInterface $entityManager,
+        private AssignmentMemo $memo,
+        private Repository $config,
+    ) {}
 
-    public function grant(Model $user, Role $role, ?Model $on = null): Model
+    public function grant(object $user, Role $role, ?Scope $on = null): object
     {
-        $this->assignmentModel()::query()->firstOrCreate($this->assignmentAttributes($user, $role, $on));
+        $this->assertPersisted($user, $on);
 
-        $this->flush($user);
+        $userId = $this->userId($user);
 
-        return $user;
-    }
-
-    public function revoke(Model $user, Role $role, ?Model $on = null): Model
-    {
-        foreach ($this->assignmentQuery($user, $on)->where('role', $role->value)->get() as $assignment) {
-            $assignment->delete();
+        if (! $this->repository()->existsFor($userId, $role->value, $on)) {
+            $this->entityManager->persist(new RoleAssignment($userId, $role->value, $on?->scopeType(), $on?->scopeId()));
+            $this->entityManager->flush();
         }
 
         $this->flush($user);
@@ -39,22 +39,45 @@ final class Grant
         return $user;
     }
 
-    /** @param iterable<Role> $roles */
-    public function syncRoles(Model $user, iterable $roles, ?Model $on = null): Model
+    public function revoke(object $user, Role $role, ?Scope $on = null): object
     {
-        $rows = collect([...$roles])
-            ->unique(static fn (Role $role): string => $role->value)
-            ->map(fn (Role $role): array => $this->assignmentAttributes($user, $role, $on));
+        $this->assertPersisted($user, $on);
 
-        $user->getConnection()->transaction(function () use ($user, $rows, $on): void {
-            $stale = $this->assignmentQuery($user, $on)->whereNotIn('role', $rows->pluck('role')->all())->get();
+        foreach ($this->repository()->findForUserAndScope($this->userId($user), $on) as $assignment) {
+            if ($assignment->getRole() === $role->value) {
+                $this->entityManager->remove($assignment);
+            }
+        }
 
-            foreach ($stale as $assignment) {
-                $assignment->delete();
+        $this->entityManager->flush();
+        $this->flush($user);
+
+        return $user;
+    }
+
+    /** @param iterable<Role> $roles */
+    public function syncRoles(object $user, iterable $roles, ?Scope $on = null): object
+    {
+        $this->assertPersisted($user, $on);
+
+        $userId = $this->userId($user);
+        $known = [];
+
+        foreach ($roles as $role) {
+            $known[$role->value] = $role->value;
+        }
+
+        $this->entityManager->wrapInTransaction(function () use ($userId, $known, $on): void {
+            foreach ($this->repository()->findForUserAndScope($userId, $on) as $assignment) {
+                if (! in_array($assignment->getRole(), $known, true)) {
+                    $this->entityManager->remove($assignment);
+                }
             }
 
-            foreach ($rows as $row) {
-                $this->assignmentModel()::query()->firstOrCreate($row);
+            foreach ($known as $value) {
+                if (! $this->repository()->existsFor($userId, $value, $on)) {
+                    $this->entityManager->persist(new RoleAssignment($userId, $value, $on?->scopeType(), $on?->scopeId()));
+                }
             }
         });
 
@@ -63,34 +86,37 @@ final class Grant
         return $user;
     }
 
-    public function hasRole(Model $user, Role $role, ?Model $on = null): bool
+    public function hasRole(object $user, Role $role, ?Scope $on = null): bool
     {
         return $this->roles($user, $on)->containsStrict($role);
     }
 
     /** @return Collection<int, Role> */
-    public function roles(Model $user, ?Model $on = null): Collection
+    public function roles(object $user, ?Scope $on = null): Collection
     {
         $roleClass = $this->roleClass();
+        $type = $on?->scopeType();
+        $id = $on?->scopeId();
+        $id = $id === null ? null : (string) $id;
 
-        $values = $this->assignments($user, $on)
-            ->where('scopeable_type', $on?->getMorphClass())
-            ->where('scopeable_id', $on?->getKey())
-            ->pluck('role')
-            ->all();
+        return $this->assignments($user)
+            ->filter(static function (RoleAssignment $assignment) use ($type, $id): bool {
+                $scopeId = $assignment->getScopeableId();
+                $scopeId = $scopeId === null ? null : (string) $scopeId;
 
-        return collect($values)
-            ->map(static fn (mixed $value): ?Role => is_string($value) ? $roleClass::tryFrom($value) : null)
+                return $assignment->getScopeableType() === $type && $scopeId === $id;
+            })
+            ->map(static fn (RoleAssignment $assignment): ?Role => $roleClass::tryFrom($assignment->getRole()))
             ->filter()
             ->values();
     }
 
     /** @return Collection<int, Ability> */
-    public function permissions(Model $user, ?Model $on = null): Collection
+    public function permissions(object $user, ?Scope $on = null): Collection
     {
         $roles = $this->roles($user);
 
-        if ($on instanceof Model) {
+        if ($on instanceof Scope) {
             $roles = $roles->merge($this->roles($user, $on));
         }
 
@@ -98,6 +124,17 @@ final class Grant
             ->flatMap(static fn (Role $role): array => $role->permissions())
             ->unique(static fn (Ability $permission): string => $permission->value)
             ->values();
+    }
+
+    /** @return list<RoleAssignment> */
+    public function assignmentsFor(object $user): array
+    {
+        return array_values($this->assignments($user)->all());
+    }
+
+    public function isPersisted(object $entity): bool
+    {
+        return Identity::isPersisted($this->entityManager, $entity);
     }
 
     /** @return class-string<Role> */
@@ -114,7 +151,8 @@ final class Grant
 
     public function superAdmin(): ?Role
     {
-        $role = config('grant.super_admin');
+        /** @var Role|null $role */
+        $role = $this->config->get('grant.super_admin');
 
         if ($role === null) {
             return null;
@@ -129,68 +167,59 @@ final class Grant
         return $role;
     }
 
-    /** @return class-string<RoleAssignment> */
-    public function assignmentModel(): string
-    {
-        $model = config('grant.model');
-
-        if (! is_string($model) || ! is_a($model, RoleAssignment::class, true)) {
-            throw InvalidConfigurationException::model(RoleAssignment::class);
-        }
-
-        return $model;
-    }
-
-    /** @return Builder<RoleAssignment> */
-    private function assignmentQuery(Model $user, ?Model $on): Builder
-    {
-        $this->assertPersisted($user, $on);
-        $query = $this->assignmentModel()::query()->where('user_id', $user->getKey());
-
-        return $on instanceof Model
-            ? $query->where('scopeable_type', $on->getMorphClass())->where('scopeable_id', $on->getKey())
-            : $query->whereNull('scopeable_type')->whereNull('scopeable_id');
-    }
-
-    /** @return array<string, mixed> */
-    private function assignmentAttributes(Model $user, Role $role, ?Model $on): array
-    {
-        $this->assertPersisted($user, $on);
-
-        return [
-            'user_id' => $user->getKey(),
-            'role' => $role->value,
-            'scopeable_type' => $on?->getMorphClass(),
-            'scopeable_id' => $on?->getKey(),
-        ];
-    }
-
-    public function flush(Model|int|string|null $user = null): void
+    public function flush(object|int|string|null $user = null): void
     {
         if ($user === null) {
-            $this->assignments = [];
+            $this->memo->flush();
 
             return;
         }
 
-        unset($this->assignments[$this->memoKey($user)]);
+        $this->memo->forget(is_object($user) ? $this->userId($user) : $user);
     }
 
-    private function memoKey(Model|int|string $user): string
+    private function userId(object $user): int|string
     {
-        $key = $user instanceof Model ? $user->getKey() : $user;
+        $id = Identity::id($this->entityManager, $user);
 
-        return is_scalar($key) ? (string) $key : serialize($key);
+        if ($id === null) {
+            throw UnsavedEntityException::user();
+        }
+
+        return $id;
+    }
+
+    private function memoKey(object $user): string
+    {
+        return (string) $this->userId($user);
     }
 
     /** @return Collection<int, RoleAssignment> */
-    private function assignments(Model $user, ?Model $on): Collection
+    private function assignments(object $user): Collection
     {
-        $this->assertPersisted($user, $on);
+        return $this->memo->remember(
+            $this->memoKey($user),
+            fn (): Collection => collect($this->repository()->findForUser($this->userId($user))),
+        );
+    }
 
-        return $this->assignments[$this->memoKey($user)] ??= $this->assignmentModel()::query()
-            ->where('user_id', $user->getKey())
-            ->get();
+    private function repository(): RoleAssignmentRepository
+    {
+        /** @var RoleAssignmentRepository $repository */
+        $repository = $this->entityManager->getRepository(RoleAssignment::class);
+
+        return $repository;
+    }
+
+    private function assertPersisted(object $user, ?Scope $on): void
+    {
+        if (! Identity::isPersisted($this->entityManager, $user)) {
+            throw UnsavedEntityException::user();
+        }
+
+        if ($on instanceof Scope && ! Identity::isPersisted($this->entityManager, $on)) {
+            throw UnsavedEntityException::scope();
+        }
     }
 
     /**
@@ -201,27 +230,16 @@ final class Grant
      */
     private function enumClass(string $key, string $interface): string
     {
-        $enum = config("grant.{$key}");
+        $enum = $this->config->get("grant.{$key}");
 
         if (! is_string($enum) || ! is_subclass_of($enum, $interface)) {
             throw InvalidConfigurationException::enum($key, $interface);
         }
 
-        if ((string) (new ReflectionEnum($enum))->getBackingType() !== 'string') {
+        if ((string) new ReflectionEnum($enum)->getBackingType() !== 'string') {
             throw InvalidConfigurationException::backingType($key);
         }
 
         return $enum;
-    }
-
-    private function assertPersisted(Model $user, ?Model $on): void
-    {
-        if (! $user->exists) {
-            throw UnsavedModelException::user();
-        }
-
-        if ($on instanceof Model && ! $on->exists) {
-            throw UnsavedModelException::scope();
-        }
     }
 }

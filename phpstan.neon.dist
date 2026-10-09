@@ -3,8 +3,16 @@ parameters:
     paths:
         - src
         - database
-        - tests/Fixtures/User.php
+        - tests/Fixtures
         - tests/TestCase.php
     tmpDir: build/phpstan
 
     reportUnmatchedIgnoredErrors: true
+
+    ignoreErrors:
+        # Doctrine assigns generated identifiers through reflection.
+        -
+            identifier: property.unusedType
+            paths:
+                - src/Entities
+                - tests/Fixtures

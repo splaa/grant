@@ -4,11 +4,29 @@ declare(strict_types=1);
 
 namespace Shipfastlabs\Grant\Tests\Fixtures;
 
-use Illuminate\Database\Eloquent\Model;
+use Doctrine\ORM\Mapping as ORM;
 
-class Post extends Model
+#[ORM\Entity]
+#[ORM\Table(name: 'posts')]
+class Post
 {
-    public $timestamps = false;
+    #[ORM\Id]
+    #[ORM\Column(type: 'integer')]
+    #[ORM\GeneratedValue]
+    private ?int $id = null;
 
-    protected $guarded = [];
+    public function __construct(
+        #[ORM\Column(name: 'author_id', type: 'integer', nullable: true)]
+        private ?int $authorId = null
+    ) {}
+
+    public function getId(): ?int
+    {
+        return $this->id;
+    }
+
+    public function getAuthorId(): ?int
+    {
+        return $this->authorId;
+    }
 }

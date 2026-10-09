@@ -11,7 +11,7 @@ class PostPolicy
     #[Requires(Permission::EditPosts)]
     public function update(User $user, Post $post): bool
     {
-        return $post->getAttribute('author_id') === $user->getKey();
+        return $post->getAuthorId() === $user->getId();
     }
 
     #[Requires(Permission::ViewReports)]

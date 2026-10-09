@@ -2,6 +2,14 @@
 
 This repository is a Laravel package. Keep the package focused, idiomatic, and easy for Laravel developers to install, test, and maintain.
 
+## Architecture
+
+- The package targets PHP 8.4+, Laravel 13, and Doctrine ORM 3 (`doctrine/orm` + `doctrine/dbal`). It builds its own EntityManager (`Shipfastlabs\Grant\Doctrine\EntityManagerFactory`) from the Laravel connection, with no framework integration package.
+- Role assignments are Doctrine entities (`Shipfastlabs\Grant\Entities\RoleAssignment`); the auth user is a Doctrine entity carrying the `HasRoles` and `Shipfastlabs\Grant\Auth\Authenticatable` traits, exposed to Laravel through the package's `doctrine` auth driver. There is no Eloquent model and no `grant.model` config.
+- The `role_assignments` schema ships as a dbmate SQL migration under `database/dbmate/{sqlite,mysql,pgsql}`, rendered by `grant:install`; do not add a Laravel migration.
+- Roles and permissions are enums and authorization goes through Laravel's native Gate. Scopes implement the `Shipfastlabs\Grant\Scope` contract.
+- Publish tags: `grant` and `grant-config`.
+
 ## Package Conventions
 
 - Use Laravel-native package APIs and the existing service provider shape before adding abstractions.

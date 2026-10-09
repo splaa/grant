@@ -4,40 +4,54 @@ declare(strict_types=1);
 
 namespace Shipfastlabs\Grant\Console\Commands;
 
+use Doctrine\ORM\EntityManagerInterface;
 use Illuminate\Console\Command;
-use Illuminate\Database\Eloquent\Model;
+use Illuminate\Contracts\Config\Repository;
 use Illuminate\Support\Collection;
 use Shipfastlabs\Grant\Ability;
 use Shipfastlabs\Grant\Grant;
 use Shipfastlabs\Grant\Role;
+use Shipfastlabs\Grant\Scope;
 
 use function Laravel\Prompts\text;
 
 final class ShowCommand extends Command
 {
-    protected $signature = 'grant:show {user? : The user ID} {--on= : Scope as ModelClass:id}';
+    protected $signature = 'grant:show {user? : The user ID} {--on= : Scope as EntityClass:id}';
 
     protected $description = 'Show a user’s roles and resolved permissions.';
 
-    public function handle(Grant $grant): int
+    public function __construct(private readonly Repository $config)
     {
-        $userClass = config('auth.providers.users.model');
+        parent::__construct();
+    }
 
-        if (! is_string($userClass) || ! is_subclass_of($userClass, Model::class)) {
-            $this->components->error('The auth user model could not be resolved.');
+    public function handle(Grant $grant, EntityManagerInterface $entityManager): int
+    {
+        $userClass = $this->config->get('auth.providers.users.model');
+
+        if (! is_string($userClass) || ! class_exists($userClass)) {
+            $this->components->error('The auth user entity could not be resolved.');
 
             return self::FAILURE;
         }
 
         $userId = $this->argument('user');
-        $user = $userClass::query()->findOrFail(
-            is_string($userId) ? $userId : text('Which user should be shown?', placeholder: 'E.g. 1', required: true),
-        );
-        $scope = $this->resolveScope($this->option('on'));
+        $id = is_string($userId) && $userId !== '' ? $userId : text('Which user should be shown?', placeholder: 'E.g. 1', required: true);
+
+        $user = $entityManager->find($userClass, is_numeric($id) ? (int) $id : $id);
+
+        if (! is_object($user)) {
+            $this->components->error("No [{$userClass}] with id [{$id}] was found.");
+
+            return self::FAILURE;
+        }
+
+        $scope = $this->resolveScope($entityManager, $this->option('on'));
 
         $rows = [['Roles', $this->format($grant->roles($user))]];
 
-        if ($scope instanceof Model) {
+        if ($scope instanceof Scope) {
             $rows[] = ['Scoped roles', $this->format($grant->roles($user, $scope))];
         }
 
@@ -58,22 +72,28 @@ final class ShowCommand extends Command
         return $values->map(static fn (Role|Ability $value): string => $value->value)->join(', ') ?: 'None';
     }
 
-    private function resolveScope(mixed $scope): ?Model
+    private function resolveScope(EntityManagerInterface $entityManager, mixed $scope): ?Scope
     {
         if ($scope === null || $scope === '') {
             return null;
         }
 
         if (! is_string($scope)) {
-            $this->fail('The --on option must use ModelClass:id.');
+            $this->fail('The --on option must use EntityClass:id.');
         }
 
         [$class, $id] = array_pad(explode(':', $scope, 2), 2, '');
 
-        if ($id === '' || ! is_subclass_of($class, Model::class)) {
-            $this->fail('The --on option must use ModelClass:id.');
+        if ($id === '' || ! is_subclass_of($class, Scope::class)) {
+            $this->fail('The --on option must use EntityClass:id.');
         }
 
-        return $class::query()->findOrFail($id);
+        $resolved = $entityManager->find($class, is_numeric($id) ? (int) $id : $id);
+
+        if (! $resolved instanceof Scope) {
+            $this->fail("No scope [{$class}:{$id}] was found.");
+        }
+
+        return $resolved;
     }
 }

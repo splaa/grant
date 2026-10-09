@@ -9,13 +9,13 @@ step() {
 
 php_is_ready() {
     command -v php >/dev/null \
-        && php -r 'exit(version_compare(PHP_VERSION, "8.3", ">=") ? 0 : 1);' \
+        && php -r 'exit(version_compare(PHP_VERSION, "8.4", ">=") ? 0 : 1);' \
         && php -r 'foreach (["bcmath", "curl", "dom", "fileinfo", "intl", "libxml", "mbstring", "pdo_sqlite", "sqlite3", "zip"] as $extension) { if (! extension_loaded($extension)) exit(1); }'
 }
 
 if ! php_is_ready || ! command -v composer >/dev/null; then
     if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null; then
-        printf 'PHP 8.3+ with the required extensions and Composer must be installed.\n' >&2
+        printf 'PHP 8.4+ with the required extensions and Composer must be installed.\n' >&2
         exit 1
     fi
 
@@ -55,7 +55,7 @@ if ! php_is_ready || ! command -v composer >/dev/null; then
 fi
 
 php_is_ready || {
-    printf 'Installed PHP does not satisfy PHP 8.3+ and the required extensions.\n' >&2
+    printf 'Installed PHP does not satisfy PHP 8.4+ and the required extensions.\n' >&2
     exit 1
 }
 

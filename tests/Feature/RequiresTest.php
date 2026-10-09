@@ -6,16 +6,15 @@ use Illuminate\Support\Facades\Gate;
 use Shipfastlabs\Grant\Tests\Fixtures\Post;
 use Shipfastlabs\Grant\Tests\Fixtures\PostPolicy;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
-use Shipfastlabs\Grant\Tests\Fixtures\User;
 
 beforeEach(function (): void {
     Gate::policy(Post::class, PostPolicy::class);
 });
 
 it('requires the attributed permission and still runs the policy', function (): void {
-    $owner = User::query()->create(['name' => 'Owner']);
-    $other = User::query()->create(['name' => 'Other']);
-    $post = new Post(['author_id' => $owner->getKey()]);
+    $owner = $this->createUser('Owner');
+    $other = $this->createUser('Other');
+    $post = new Post($owner->getId());
 
     $owner->grant(Role::Viewer);
     expect(Gate::forUser($owner)->allows('update', $post))->toBeFalse();
@@ -28,14 +27,14 @@ it('requires the attributed permission and still runs the policy', function (): 
 });
 
 it('does not recurse when the attribute names the policy ability itself', function (): void {
-    $user = User::query()->create(['name' => 'Viewer']);
+    $user = $this->createUser('Viewer');
     $user->grant(Role::Viewer);
 
     expect(Gate::forUser($user)->allows('view-reports', new Post))->toBeTrue();
 });
 
 it('denies with the attributed permission’s message', function (): void {
-    $user = User::query()->create(['name' => 'Viewer']);
+    $user = $this->createUser('Viewer');
     $user->grant(Role::Viewer);
 
     expect(Gate::forUser($user)->inspect('update', new Post)->message())->toBe('Editor access is required.');

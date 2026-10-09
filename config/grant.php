@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use App\Enums\Permission;
 use App\Enums\Role;
-use Shipfastlabs\Grant\Models\RoleAssignment;
 
 return [
 
@@ -49,15 +48,55 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Assignment Model
+    | Doctrine Entity Paths
     |--------------------------------------------------------------------------
     |
-    | This Eloquent model represents a single row of the role_assignments table
-    | and backs each query Grant makes. You may subclass it and point this
-    | option at your subclass to add relationships, scopes, or methods.
+    | Directories Doctrine scans for attribute-mapped entities, in addition to
+    | the package's own entities. Point this at wherever your application keeps
+    | its Doctrine entities.
     |
     */
 
-    'model' => RoleAssignment::class,
+    'entities' => [
+        app_path('Entities'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Database Connection
+    |--------------------------------------------------------------------------
+    |
+    | The Laravel database connection Doctrine should use. Leave it null to use
+    | your default connection from config/database.php.
+    |
+    */
+
+    'connection' => null,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Key Type
+    |--------------------------------------------------------------------------
+    |
+    | The identifier type of your user entity, and therefore of the user_id and
+    | scopeable_id columns. Use "int" for auto-incrementing keys, or "uuid" /
+    | "ulid" for 36 / 26 character string keys. `grant:install --key-type` writes
+    | the matching dbmate migration and this value together.
+    |
+    */
+
+    'key_type' => 'int',
+
+    /*
+    |--------------------------------------------------------------------------
+    | dbmate Path
+    |--------------------------------------------------------------------------
+    |
+    | Directory `grant:install` writes the dbmate migration to, relative to the
+    | application root unless an absolute path is given.
+    |
+    */
+
+    'dbmate_path' => 'db/migrations',
 
 ];

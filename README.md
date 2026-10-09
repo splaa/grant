@@ -10,7 +10,7 @@
 
 ## Introduction
 
-Grant gives your Laravel app roles and permissions with almost nothing to learn. Permissions are a PHP enum. Roles are a PHP enum. Only the assignments live in the database, and every check goes through Laravel's native Gate:
+Grant gives your Doctrine-backed Laravel app roles and permissions with almost nothing to learn. Permissions are a PHP enum. Roles are a PHP enum. Only the assignments live in the database, stored as Doctrine ORM entities, and every check goes through Laravel's native Gate:
 
 ```php
 $user->grant(Role::Editor);
@@ -20,29 +20,62 @@ $user->can(Permission::EditPosts);
 
 Grant has no check API of its own, so if you ever remove it, every `can` call in your app keeps working.
 
-## Installation
+## Requirements
 
-Grant requires PHP 8.3+ and Laravel 12 or 13.
+- PHP 8.4+
+- Laravel 13
+- Doctrine ORM 3 (`doctrine/orm` and `doctrine/dbal`, installed for you)
+- The [dbmate](https://github.com/amacneil/dbmate) CLI to run the shipped SQL migration
+
+## Installation
 
 ```shell
 composer require shipfastlabs/grant
 
 php artisan grant:install
-php artisan migrate
+dbmate up
 ```
 
-The install command publishes the config and migration, and creates starter `app/Enums/Permission.php` and `app/Enums/Role.php` enums if you don't have them yet.
+`grant:install` publishes the config and writes a dbmate migration into `db/migrations`, and creates starter `app/Enums/Permission.php` and `app/Enums/Role.php` enums if you don't have them yet. Pass `--key-type=uuid` or `--key-type=ulid` when your user entity uses string keys, and `--migrate` to run `dbmate up` for you when the binary is available.
 
-Then add the `HasRoles` trait to your user model:
+Grant builds its own Doctrine `EntityManager` from your Laravel database connection, so there is no separate Doctrine integration package to configure. Point `grant.entities` at your entity directory (it defaults to `app/Entities`).
+
+Add the `HasRoles` and `Authenticatable` traits to your user entity:
 
 ```php
+use Doctrine\ORM\Mapping as ORM;
+use Shipfastlabs\Grant\Auth\Authenticatable;
 use Shipfastlabs\Grant\HasRoles;
 
-class User extends Authenticatable
+#[ORM\Entity]
+#[ORM\Table(name: 'users')]
+class User implements Illuminate\Contracts\Auth\Authenticatable
 {
+    use Authenticatable;
     use HasRoles;
+
+    #[ORM\Id]
+    #[ORM\Column(type: 'integer')]
+    #[ORM\GeneratedValue]
+    private ?int $id = null;
+
+    // ...
 }
 ```
+
+Point Laravel's auth at it with the `doctrine` driver Grant registers:
+
+```php
+// config/auth.php
+'providers' => [
+    'users' => [
+        'driver' => 'doctrine',
+        'model' => App\Entities\User::class,
+    ],
+],
+```
+
+Grant registers its own entity path automatically, so you only need to map your application entities.
 
 ## Quick Start
 
@@ -114,8 +147,9 @@ $user->revoke(Role::Editor);
 $user->syncRoles([Role::Editor, Role::Viewer]);
 
 $user->hasRole(Role::Admin);
-$user->roles();       // Collection<Role>
-$user->permissions(); // Collection<Permission>
+$user->roles();          // Collection<Role>
+$user->permissions();    // Collection<Permission>
+$user->roleAssignments(); // list<RoleAssignment> entities
 ```
 
 ### Check permissions
@@ -143,7 +177,25 @@ That's it. The rest of this document covers the optional extras.
 
 ## Scoped Roles
 
-Pass any Eloquent model as `on` to scope a role to a team, project, or anything else:
+Pass any entity that implements `Shipfastlabs\Grant\Scope` as `on` to scope a role to a team, project, or anything else. Grant ships an `IsScope` trait that uses the entity's class name as the scope type and its `getId()` as the scope id:
+
+```php
+use Doctrine\ORM\Mapping as ORM;
+use Shipfastlabs\Grant\Concerns\IsScope;
+use Shipfastlabs\Grant\Scope;
+
+#[ORM\Entity]
+#[ORM\Table(name: 'teams')]
+class Team implements Scope
+{
+    use IsScope;
+
+    #[ORM\Id]
+    #[ORM\Column(type: 'integer')]
+    #[ORM\GeneratedValue]
+    private ?int $id = null;
+}
+```
 
 ```php
 $user->grant(Role::Admin, on: $team);
@@ -156,7 +208,7 @@ $user->permissions(on: $team);
 $user->can(Permission::EditPosts, $team);
 ```
 
-A scoped check also includes the user's global roles, so it never grants less than an unscoped check.
+A scoped check also includes the user's global roles, so it never grants less than an unscoped check. Grant stores a scope as an opaque (type, id) pair — Doctrine has no polymorphic `morphTo` — so resolve the entity yourself with `EntityManager::find($type, $id)` if you need it back.
 
 ## Policies
 
@@ -166,7 +218,7 @@ Policies keep owning model-level rules like ownership. Grant supplies the capabi
 public function update(User $user, Post $post): bool
 {
     return $user->can(Permission::EditPosts)
-        && $post->author_id === $user->id;
+        && $post->getAuthorId() === $user->getId();
 }
 ```
 
@@ -178,11 +230,11 @@ use Shipfastlabs\Grant\Requires;
 #[Requires(Permission::EditPosts)]
 public function update(User $user, Post $post): bool
 {
-    return $post->author_id === $user->id;
+    return $post->getAuthorId() === $user->getId();
 }
 ```
 
-Gate arguments are forwarded, so `#[Requires]` respects roles scoped to the policy's model.
+Gate arguments are forwarded, so `#[Requires]` respects roles scoped to the policy's entity.
 
 ## Super Admins
 
@@ -216,9 +268,9 @@ With `--no-interaction` it only reports orphans and exits with a failure status,
 
 ## Caching
 
-Grant loads a user's assignments once per request and answers every later `can`, `hasRole`, `roles`, and `permissions` call from memory. Authorizing fifty models in a loop costs one query.
+Grant loads a user's assignments once per request and answers every later `can`, `hasRole`, `roles`, and `permissions` call from memory. Authorizing fifty entities in a loop costs one query.
 
-The memo is cleared per request (and per job in queue workers, and under Octane). Granting, revoking, syncing, and saving or deleting a `RoleAssignment` clear it for you. Only bulk query-builder writes bypass it, so flush manually after those:
+The memo is cleared per request (and per job in queue workers, and under Octane). Granting, revoking, and syncing clear it, and a Doctrine lifecycle subscriber clears it whenever a `RoleAssignment` entity is persisted, updated, or removed. Bulk writes that bypass Doctrine — DQL `UPDATE`/`DELETE` or raw SQL — do not, so flush manually after those:
 
 ```php
 use Shipfastlabs\Grant\Facades\Grant;
@@ -229,7 +281,7 @@ Grant::flush();      // everyone
 
 ## The Grant Facade
 
-The facade mirrors the assignment methods for places where calling the model is awkward. It never performs checks.
+The facade mirrors the assignment methods for places where calling the entity is awkward. It never performs checks.
 
 ```php
 Grant::grant($user, Role::Editor);
@@ -240,29 +292,23 @@ Grant::hasRole($user, Role::Editor);
 
 ## Configuration
 
-`config/grant.php` has four options:
+`config/grant.php` has these options:
 
 ```php
 return [
     'roles' => App\Enums\Role::class,
     'permissions' => App\Enums\Permission::class,
     'super_admin' => null,
-    'model' => Shipfastlabs\Grant\Models\RoleAssignment::class,
+    'entities' => [app_path('Entities')],
+    'connection' => null,
+    'key_type' => 'int',
+    'dbmate_path' => 'db/migrations',
 ];
 ```
 
-To add your own relationships or scopes, extend `Shipfastlabs\Grant\Models\RoleAssignment` and point `model` at your subclass.
+`entities` lists the directories Doctrine scans for attribute-mapped entities; `connection` picks a Laravel database connection and defaults to your app default. `key_type` matches your user entity's primary key — `int` (default), `uuid` (36 chars), or `ulid` (26 chars). `grant:install` writes the matching SQL and config together; if you edit it by hand, keep the `role_assignments` columns and this value in sync.
 
-If your users or scoped models use UUID or ULID keys, edit the published migration before running it: switch `foreignId` to `foreignUuid` or `foreignUlid`, and `nullableMorphs` to `nullableUuidMorphs` or `nullableUlidMorphs`.
-
-Grant supports a single user model: the one set in `auth.providers.users.model`.
-
-To publish resources individually:
-
-```shell
-php artisan vendor:publish --tag=grant-config
-php artisan vendor:publish --tag=grant-migrations
-```
+Grant supports a single user entity: the one set in `auth.providers.users.model`.
 
 ## Artisan Commands
 
@@ -272,7 +318,7 @@ php artisan grant:list
 
 # Show a user's roles and resolved permissions...
 php artisan grant:show 1
-php artisan grant:show 1 --on='App\Models\Team:5'
+php artisan grant:show 1 --on='App\Entities\Team:5'
 
 # Remap or delete stored roles that no longer match the enum...
 php artisan grant:sync
@@ -301,17 +347,14 @@ Implement Filament's `HasLabel` on your role enum to control the labels.
 
 ## Testing
 
-Add a factory state to create users with roles:
+Seed roles on a Doctrine entity in your test setup:
 
 ```php
-public function role(Role $role, ?Model $on = null): static
-{
-    return $this->afterCreating(fn (User $user) => $user->grant($role, $on));
-}
-```
+$user = new User('Taylor');
+$entityManager->persist($user);
+$entityManager->flush();
 
-```php
-$editor = User::factory()->role(Role::Editor)->create();
+$user->grant(Role::Editor);
 ```
 
 For fluent assertions, use the `InteractsWithGrant` trait in your base test case:

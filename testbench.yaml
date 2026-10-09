@@ -4,7 +4,6 @@ providers:
   - Workbench\App\Providers\WorkbenchServiceProvider
 
 migrations:
-  - database/migrations
   - workbench/database/migrations
 
 workbench:
@@ -22,7 +21,6 @@ workbench:
     - asset-publish
     - create-sqlite-db
     - db-wipe
-    - migrate-fresh
   assets:
     - laravel-assets
   sync:

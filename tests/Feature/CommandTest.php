@@ -2,10 +2,9 @@
 
 declare(strict_types=1);
 
-use Shipfastlabs\Grant\Models\RoleAssignment;
+use Shipfastlabs\Grant\Entities\RoleAssignment;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
 use Shipfastlabs\Grant\Tests\Fixtures\Team;
-use Shipfastlabs\Grant\Tests\Fixtures\User;
 
 use function Orchestra\Testbench\default_skeleton_path;
 
@@ -23,11 +22,11 @@ it('lists registered permission abilities', function (): void {
 });
 
 it('shows a user’s roles and resolved permissions', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
+    $user = $this->createUser('Taylor');
     $user->grant(Role::Editor);
 
     $this->artisan('grant:show')
-        ->expectsQuestion('Which user should be shown?', $user->getKey())
+        ->expectsQuestion('Which user should be shown?', $user->getId())
         ->expectsTable([], [
             ['Roles', 'editor'],
             ['Permissions', 'edit-posts, delete-posts'],
@@ -35,15 +34,29 @@ it('shows a user’s roles and resolved permissions', function (): void {
         ->assertSuccessful();
 });
 
-it('remaps or deletes stored roles that no longer match the enum', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $other = User::query()->create(['name' => 'Other']);
+it('shows global and scoped roles separately', function (): void {
+    $user = $this->createUser('Taylor');
+    $team = $this->createTeam('Laravel');
     $user->grant(Role::Editor);
-    RoleAssignment::query()->insert([
-        ['user_id' => $user->getKey(), 'role' => 'legacy-admin', 'scopeable_type' => null, 'scopeable_id' => null],
-        ['user_id' => $other->getKey(), 'role' => 'legacy-admin', 'scopeable_type' => null, 'scopeable_id' => null],
-        ['user_id' => $other->getKey(), 'role' => 'removed', 'scopeable_type' => null, 'scopeable_id' => null],
-    ]);
+
+    $this->artisan('grant:show', ['user' => (string) $user->getId(), '--on' => Team::class.':'.$team->getId()])
+        ->expectsTable([], [
+            ['Roles', 'editor'],
+            ['Scoped roles', 'None'],
+            ['Permissions', 'edit-posts, delete-posts'],
+        ])
+        ->assertSuccessful();
+});
+
+it('remaps or deletes stored roles that no longer match the enum', function (): void {
+    $user = $this->createUser('Taylor');
+    $other = $this->createUser('Other');
+    $user->grant(Role::Editor);
+
+    $this->em()->persist(new RoleAssignment((int) $user->getId(), 'legacy-admin'));
+    $this->em()->persist(new RoleAssignment((int) $other->getId(), 'legacy-admin'));
+    $this->em()->persist(new RoleAssignment((int) $other->getId(), 'removed'));
+    $this->em()->flush();
 
     $this->artisan('grant:sync', ['--no-interaction' => true])
         ->expectsOutputToContain('legacy-admin, removed')
@@ -58,19 +71,23 @@ it('remaps or deletes stored roles that no longer match the enum', function (): 
 
     expect($user->roles()->all())->toBe([Role::Editor])
         ->and($other->roles()->all())->toBe([Role::Editor])
-        ->and(RoleAssignment::query()->count())->toBe(2);
+        ->and($this->em()->getRepository(RoleAssignment::class)->count([]))->toBe(2);
 
     $this->artisan('grant:sync')
         ->expectsOutputToContain('Every stored role matches')
         ->assertSuccessful();
 });
 
-it('installs the config, migration, and starter enums', function (): void {
+it('installs the config, dbmate migration, and starter enums', function (): void {
     config()->set('grant.permissions', 'App\\Enums\\Permission');
     config()->set('grant.roles', 'App\\Enums\\Role');
 
+    $migrationDirectory = base_path((string) config('grant.dbmate_path'));
+
     try {
         $this->artisan('grant:install')->assertSuccessful();
+
+        $migrations = glob($migrationDirectory.'/*_create_role_assignments.sql') ?: [];
 
         expect(file_get_contents(app_path('Enums/Permission.php')))
             ->toContain('namespace App\\Enums;')
@@ -79,25 +96,19 @@ it('installs the config, migration, and starter enums', function (): void {
             ->toContain('enum Role: string implements RoleContract')
             ->toContain('self::Admin => Permission::cases(),')
             ->and(file_exists(config_path('grant.php')))->toBeTrue()
-            ->and(file_exists(default_skeleton_path().'/config/grant.php'))->toBeFalse();
+            ->and(file_exists(default_skeleton_path().'/config/grant.php'))->toBeFalse()
+            ->and($migrations)->toHaveCount(1)
+            ->and(file_get_contents($migrations[0]))
+            ->toContain('-- migrate:up')
+            ->toContain('CREATE TABLE role_assignments')
+            ->toContain('user_id INTEGER NOT NULL')
+            ->toContain('scopeable_id INTEGER NULL')
+            ->toContain('REFERENCES users (id) ON DELETE CASCADE');
     } finally {
         @unlink(app_path('Enums/Permission.php'));
         @unlink(app_path('Enums/Role.php'));
         @unlink(config_path('grant.php'));
-        array_map(unlink(...), glob(database_path('migrations/*_create_role_assignments_table.php')) ?: []);
+        array_map(unlink(...), glob($migrationDirectory.'/*_create_role_assignments.sql') ?: []);
+        @rmdir($migrationDirectory);
     }
-});
-
-it('shows global and scoped roles separately', function (): void {
-    $user = User::query()->create(['name' => 'Taylor']);
-    $team = Team::query()->create(['name' => 'Laravel']);
-    $user->grant(Role::Editor);
-
-    $this->artisan('grant:show', ['user' => (string) $user->getKey(), '--on' => Team::class.':'.$team->getKey()])
-        ->expectsTable([], [
-            ['Roles', 'editor'],
-            ['Scoped roles', 'None'],
-            ['Permissions', 'edit-posts, delete-posts'],
-        ])
-        ->assertSuccessful();
 });

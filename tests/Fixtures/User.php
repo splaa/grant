@@ -4,30 +4,38 @@ declare(strict_types=1);
 
 namespace Shipfastlabs\Grant\Tests\Fixtures;
 
-use Illuminate\Auth\Authenticatable;
+use Doctrine\ORM\Mapping as ORM;
 use Illuminate\Contracts\Auth\Access\Authorizable as AuthorizableContract;
 use Illuminate\Contracts\Auth\Authenticatable as AuthenticatableContract;
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Auth\Access\Authorizable;
+use Shipfastlabs\Grant\Auth\Authenticatable;
 use Shipfastlabs\Grant\HasRoles;
 
-class User extends Model implements AuthenticatableContract, AuthorizableContract
+#[ORM\Entity]
+#[ORM\Table(name: 'users')]
+class User implements AuthenticatableContract, AuthorizableContract
 {
     use Authenticatable;
     use Authorizable;
-
-    /** @use HasFactory<UserFactory> */
-    use HasFactory;
-
     use HasRoles;
 
-    public $timestamps = false;
+    #[ORM\Id]
+    #[ORM\Column(type: 'integer')]
+    #[ORM\GeneratedValue]
+    private ?int $id = null;
 
-    protected $guarded = [];
+    public function __construct(
+        #[ORM\Column(type: 'string')]
+        private string $name
+    ) {}
 
-    protected static function newFactory(): UserFactory
+    public function getId(): ?int
     {
-        return UserFactory::new();
+        return $this->id;
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
     }
 }
