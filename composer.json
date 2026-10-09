@@ -40,6 +40,9 @@
         "phpstan/extension-installer": "^1.4",
         "rector/rector": "^2.4.2"
     },
+    "suggest": {
+        "laravel-doctrine/orm": "Share its EntityManager with Grant through the grant.entity_manager option (^3.3)."
+    },
     "autoload": {
         "psr-4": {
             "Shipfastlabs\\Grant\\": "src/"

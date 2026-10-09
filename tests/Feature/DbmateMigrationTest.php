@@ -110,6 +110,7 @@ it('generates a drift-free role_assignments schema with doctrine schema tooling'
     $user = new User('Taylor');
     $entityManager->persist($user);
     $entityManager->flush();
+
     $user->grant(Role::Editor);
     $user->grant(Role::Editor, $this->createTeam('Laravel'));
 

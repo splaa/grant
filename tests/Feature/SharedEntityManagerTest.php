@@ -17,35 +17,6 @@ use Shipfastlabs\Grant\Tests\Fixtures\Permission;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
 use Shipfastlabs\Grant\Tests\Fixtures\User;
 
-/** @return array<string, mixed> */
-function laravelDoctrineConfig(string $database): array
-{
-    touch($database);
-
-    return [
-        'database.connections.testing' => [
-            'driver' => 'sqlite',
-            'database' => $database,
-            'foreign_key_constraints' => true,
-        ],
-        'doctrine.managers' => [
-            'default' => [
-                'dev' => true,
-                'meta' => 'attributes',
-                'connection' => 'testing',
-                'paths' => [__DIR__.'/../Fixtures'],
-                'proxies' => ['namespace' => 'DoctrineProxies', 'path' => sys_get_temp_dir(), 'auto_generate' => true],
-                'events' => ['listeners' => [], 'subscribers' => []],
-                'filters' => [],
-                'mapping_types' => [],
-                'middlewares' => [],
-            ],
-        ],
-        'auth.providers.users.driver' => 'doctrine',
-        'grant.entity_manager' => 'default',
-    ];
-}
-
 function registryManager(): EntityManagerInterface
 {
     /** @var ManagerRegistry $registry */
@@ -66,7 +37,7 @@ afterEach(function (): void {
 });
 
 it('shares the laravel-doctrine entity manager in either provider order', function (array $providers): void {
-    $this->bootWithProviders($providers, laravelDoctrineConfig($this->database));
+    $this->bootWithProviders($providers, $this->laravelDoctrineConfig($this->database));
 
     $entityManager = registryManager();
     $user = $this->createUser('Taylor');
@@ -83,14 +54,14 @@ it('shares the laravel-doctrine entity manager in either provider order', functi
 ]);
 
 it('rolls role changes back with laravel-doctrine transactions', function (): void {
-    $this->bootWithProviders([DoctrineServiceProvider::class, GrantServiceProvider::class], laravelDoctrineConfig($this->database));
+    $this->bootWithProviders([DoctrineServiceProvider::class, GrantServiceProvider::class], $this->laravelDoctrineConfig($this->database));
 
     $entityManager = registryManager();
     $user = $this->createUser('Taylor');
 
     expect($user->hasRole(Role::Editor))->toBeFalse();
 
-    expect(fn () => $entityManager->wrapInTransaction(function () use ($user): never {
+    expect(fn (): mixed => $entityManager->wrapInTransaction(function () use ($user): never {
         $user->grant(Role::Editor);
 
         expect($user->hasRole(Role::Editor))->toBeTrue();
@@ -105,7 +76,7 @@ it('rolls role changes back with laravel-doctrine transactions', function (): vo
 });
 
 it('keeps working after laravel-doctrine resets the manager', function (): void {
-    $this->bootWithProviders([DoctrineServiceProvider::class, GrantServiceProvider::class], laravelDoctrineConfig($this->database));
+    $this->bootWithProviders([DoctrineServiceProvider::class, GrantServiceProvider::class], $this->laravelDoctrineConfig($this->database));
 
     $user = $this->createUser('Taylor');
     $previous = registryManager();
@@ -124,13 +95,13 @@ it('keeps working after laravel-doctrine resets the manager', function (): void 
 });
 
 it('leaves the doctrine auth driver to laravel-doctrine', function (): void {
-    $this->bootWithProviders([DoctrineServiceProvider::class, GrantServiceProvider::class], laravelDoctrineConfig($this->database));
+    $this->bootWithProviders([DoctrineServiceProvider::class, GrantServiceProvider::class], $this->laravelDoctrineConfig($this->database));
 
     expect(Auth::createUserProvider('users'))->toBeInstanceOf(LaravelDoctrineUserProvider::class);
 });
 
 it('lets laravel-doctrine schema commands manage role_assignments without drift', function (): void {
-    $this->refreshWithConfig(laravelDoctrineConfig($this->database), [DoctrineServiceProvider::class, GrantServiceProvider::class]);
+    $this->refreshWithConfig($this->laravelDoctrineConfig($this->database), [DoctrineServiceProvider::class, GrantServiceProvider::class]);
 
     $this->artisan('doctrine:schema:create')->assertSuccessful();
 
@@ -142,6 +113,7 @@ it('lets laravel-doctrine schema commands manage role_assignments without drift'
     $user = new User('Taylor');
     $entityManager->persist($user);
     $entityManager->flush();
+
     $user->grant(Role::Editor);
 
     expect($user->hasRole(Role::Editor))->toBeTrue();

@@ -76,6 +76,38 @@ abstract class TestCase extends Orchestra
         $this->refreshApplication();
     }
 
+    /**
+     * @param  list<string>  $managers
+     * @return array<string, mixed>
+     */
+    public function laravelDoctrineConfig(string $database, array $managers = ['default']): array
+    {
+        touch($database);
+
+        $manager = [
+            'dev' => true,
+            'meta' => 'attributes',
+            'connection' => 'testing',
+            'paths' => [__DIR__.'/Fixtures'],
+            'proxies' => ['namespace' => 'DoctrineProxies', 'path' => sys_get_temp_dir(), 'auto_generate' => true],
+            'events' => ['listeners' => [], 'subscribers' => []],
+            'filters' => [],
+            'mapping_types' => [],
+            'middlewares' => [],
+        ];
+
+        return [
+            'database.connections.testing' => [
+                'driver' => 'sqlite',
+                'database' => $database,
+                'foreign_key_constraints' => true,
+            ],
+            'doctrine.managers' => array_fill_keys($managers, $manager),
+            'auth.providers.users.driver' => 'doctrine',
+            'grant.entity_manager' => 'default',
+        ];
+    }
+
     protected function defineDatabaseMigrations(): void
     {
         $entityManager = $this->em();

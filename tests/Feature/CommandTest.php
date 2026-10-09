@@ -2,7 +2,11 @@
 
 declare(strict_types=1);
 
+use Doctrine\ORM\EntityManagerInterface;
+use LaravelDoctrine\ORM\DoctrineServiceProvider;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
+use Shipfastlabs\Grant\GrantServiceProvider;
+use Shipfastlabs\Grant\Tests\Fixtures\ForeignEntityManagerServiceProvider;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
 use Shipfastlabs\Grant\Tests\Fixtures\Team;
 
@@ -15,6 +19,15 @@ afterEach(function (): void {
     array_map(unlink(...), glob($migrationDirectory.'/*_create_role_assignments.sql') ?: []);
     @rmdir($migrationDirectory);
 });
+
+/**
+ * @param  list<string>  $managers
+ * @return array<string, mixed>
+ */
+function installWithLaravelDoctrine(array $managers): array
+{
+    return [...test()->laravelDoctrineConfig(tempnam(sys_get_temp_dir(), 'grant-install-'), $managers), 'grant.entity_manager' => null];
+}
 
 /** @return list<string> */
 function grantInstalledMigrations(): array
@@ -140,7 +153,9 @@ it('renders the migration for the grant connection driver, not the default one',
 });
 
 it('does not write a second migration when grant:install runs again', function (): void {
-    $this->artisan('grant:install')->assertSuccessful();
+    $this->artisan('grant:install')
+        ->doesntExpectOutputToContain('Found an application EntityManager')
+        ->assertSuccessful();
     $first = grantInstalledMigrations();
 
     $this->artisan('grant:install')
@@ -205,4 +220,61 @@ it('reports a missing user or a malformed scope in grant:show', function (): voi
     $this->artisan('grant:show', ['user' => (string) $user->getId(), '--on' => Team::class.':999'])
         ->expectsOutputToContain('No scope')
         ->assertFailed();
+});
+
+it('offers to share a laravel-doctrine entity manager and lets you pick one', function (): void {
+    $this->refreshWithConfig(installWithLaravelDoctrine(['default', 'reporting']), [DoctrineServiceProvider::class, GrantServiceProvider::class]);
+
+    $this->artisan('grant:install')
+        ->expectsOutputToContain('Found application EntityManagers: [default], [reporting].')
+        ->expectsConfirmation('Should Grant share it instead of building its own EntityManager?', 'yes')
+        ->expectsChoice('Which EntityManager should Grant use?', 'reporting', ['default', 'reporting'])
+        ->expectsOutputToContain('Keep laravel-doctrine')
+        ->assertSuccessful();
+
+    expect(file_get_contents(config_path('grant.php')))->toContain("'entity_manager' => env('GRANT_ENTITY_MANAGER', 'reporting')")
+        ->and(grantInstalledMigrations())->toBeEmpty();
+});
+
+it('shares the default registry manager without interaction', function (): void {
+    $this->refreshWithConfig(installWithLaravelDoctrine(['default', 'reporting']), [DoctrineServiceProvider::class, GrantServiceProvider::class]);
+
+    $this->artisan('grant:install', ['--no-interaction' => true])->assertSuccessful();
+
+    expect(file_get_contents(config_path('grant.php')))->toContain("'entity_manager' => env('GRANT_ENTITY_MANAGER', 'default')")
+        ->and(grantInstalledMigrations())->toBeEmpty();
+
+    config()->set('grant.entity_manager', 'default');
+
+    $this->artisan('grant:install')
+        ->expectsOutputToContain('Grant already shares the [default] EntityManager.')
+        ->assertSuccessful();
+});
+
+it('offers to share an EntityManagerInterface bound by the application', function (): void {
+    $this->refreshWithConfig([], [ForeignEntityManagerServiceProvider::class, GrantServiceProvider::class]);
+
+    $this->artisan('grant:install')
+        ->expectsOutputToContain('Found an application EntityManager: ['.EntityManagerInterface::class.'].')
+        ->expectsConfirmation('Should Grant share it instead of building its own EntityManager?', 'yes')
+        ->expectsOutputToContain('doctrine:schema:update --force')
+        ->doesntExpectOutputToContain('Keep laravel-doctrine')
+        ->assertSuccessful();
+
+    $config = require config_path('grant.php');
+
+    expect($config['entity_manager'])->toBe(EntityManagerInterface::class)
+        ->and(grantInstalledMigrations())->toBeEmpty();
+});
+
+it('keeps its own entity manager and dbmate migration when sharing is declined', function (): void {
+    $this->refreshWithConfig([], [ForeignEntityManagerServiceProvider::class, GrantServiceProvider::class]);
+
+    $this->artisan('grant:install')
+        ->expectsConfirmation('Should Grant share it instead of building its own EntityManager?', 'no')
+        ->expectsOutputToContain('dbmate up')
+        ->assertSuccessful();
+
+    expect(file_get_contents(config_path('grant.php')))->toContain("'entity_manager' => env('GRANT_ENTITY_MANAGER'),")
+        ->and(grantInstalledMigrations())->toHaveCount(1);
 });
