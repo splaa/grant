@@ -5,17 +5,19 @@ declare(strict_types=1);
 namespace Shipfastlabs\Grant\Doctrine;
 
 use Doctrine\Common\EventManager;
-use Doctrine\DBAL\Driver\AbstractSQLiteDriver\Middleware\EnableForeignKeys;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\Driver\AttributeDriver;
 use Illuminate\Contracts\Config\Repository;
-use Illuminate\Support\ConfigurationUrlParser;
-use Shipfastlabs\Grant\Internal\AssignmentMemo;
+use Illuminate\Contracts\Container\Container;
+use Illuminate\Database\Connection;
+use Illuminate\Database\ConnectionResolverInterface;
+use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
 use Shipfastlabs\Grant\Listeners\ConfigureRoleAssignmentMapping;
 use Shipfastlabs\Grant\Listeners\FlushGrantMemo;
+use Shipfastlabs\Grant\Listeners\InjectGrantService;
 
 final readonly class EntityManagerFactory
 {
@@ -28,21 +30,10 @@ final readonly class EntityManagerFactory
         'sqlsrv' => 'pdo_sqlsrv',
     ];
 
-    /** @var array<string, string> */
-    private const array CONNECTION_KEYS = [
-        'host' => 'host',
-        'port' => 'port',
-        'database' => 'dbname',
-        'username' => 'user',
-        'password' => 'password',
-        'charset' => 'charset',
-        'sslmode' => 'sslmode',
-        'unix_socket' => 'unix_socket',
-    ];
-
     public function __construct(
         private Repository $config,
-        private AssignmentMemo $memo,
+        private ConnectionResolverInterface $connections,
+        private Container $container,
     ) {}
 
     public function make(): EntityManagerInterface
@@ -52,17 +43,19 @@ final readonly class EntityManagerFactory
         $configuration = new Configuration;
         $configuration->setMetadataDriverImpl(new AttributeDriver($this->paths()));
         $configuration->enableNativeLazyObjects(true);
-
-        if (($connection['driver'] ?? null) === 'sqlite' && ($connection['foreign_key_constraints'] ?? false) === true) {
-            $configuration->setMiddlewares([new EnableForeignKeys]);
-        }
+        $configuration->setMiddlewares([new LaravelConnectionMiddleware($connection)]);
 
         $eventManager = new EventManager;
         $eventManager->addEventSubscriber(new ConfigureRoleAssignmentMapping($this->config));
-        $eventManager->addEventSubscriber(new FlushGrantMemo($this->memo));
+        $eventManager->addEventSubscriber(new FlushGrantMemo($this->container));
+        $eventManager->addEventSubscriber(new InjectGrantService($this->container));
 
-        // @phpstan-ignore argument.type (params are validated by DBAL at runtime)
-        $dbal = DriverManager::getConnection($this->connectionParams($connection), $configuration);
+        $driver = $connection->getDriverName();
+
+        $dbal = DriverManager::getConnection(
+            ['driver' => self::DBAL_DRIVERS[$driver] ?? throw InvalidConfigurationException::connectionDriver($driver)],
+            $configuration,
+        );
 
         return new EntityManager($dbal, $configuration, $eventManager);
     }
@@ -80,72 +73,14 @@ final readonly class EntityManagerFactory
         )));
     }
 
-    /** @return array<string, mixed> */
-    private function connection(): array
+    private function connection(): Connection
     {
         $name = $this->config->get('grant.connection');
-        $name = is_string($name) && $name !== '' ? $name : $this->config->get('database.default', 'mysql');
-        $name = is_string($name) ? $name : 'mysql';
-
-        /** @var array<string, mixed> $connection */
-        $connection = $this->config->get("database.connections.{$name}", []);
-
-        return new ConfigurationUrlParser()->parseConfiguration($connection);
-    }
-
-    /**
-     * @param  array<string, mixed>  $connection
-     * @return array<string, mixed>
-     */
-    private function connectionParams(array $connection): array
-    {
-        $driver = $connection['driver'] ?? 'mysql';
-        $driver = is_string($driver) ? $driver : 'mysql';
-
-        $params = ['driver' => self::DBAL_DRIVERS[$driver] ?? $driver];
-
-        return match ($driver) {
-            'sqlite' => [...$params, ...$this->sqliteParams($connection)],
-            default => [...$params, ...$this->serverParams($connection)],
-        };
-    }
-
-    /**
-     * @param  array<string, mixed>  $connection
-     * @return array<string, mixed>
-     */
-    private function sqliteParams(array $connection): array
-    {
-        $database = $connection['database'] ?? null;
+        $connection = $this->connections->connection(is_string($name) && $name !== '' ? $name : null);
 
         return match (true) {
-            ! is_string($database), $database === '', $database === ':memory:' => ['memory' => true],
-            default => ['path' => $database],
+            $connection instanceof Connection => $connection,
+            default => throw InvalidConfigurationException::connectionDriver($connection::class),
         };
-    }
-
-    /**
-     * @param  array<string, mixed>  $connection
-     * @return array<string, mixed>
-     */
-    private function serverParams(array $connection): array
-    {
-        $params = [];
-
-        foreach (self::CONNECTION_KEYS as $from => $to) {
-            $value = $connection[$from] ?? null;
-
-            if ($value !== null && $value !== '') {
-                $params[$to] = $value;
-            }
-        }
-
-        $options = $connection['options'] ?? null;
-
-        if (is_array($options) && $options !== []) {
-            $params['driverOptions'] = $options;
-        }
-
-        return $params;
     }
 }

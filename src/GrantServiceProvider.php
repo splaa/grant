@@ -6,12 +6,15 @@ namespace Shipfastlabs\Grant;
 
 use Closure;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Events;
 use Illuminate\Auth\Access\Response;
 use Illuminate\Auth\AuthManager;
 use Illuminate\Contracts\Auth\Access\Gate;
 use Illuminate\Contracts\Config\Repository;
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Hashing\Hasher;
+use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
 use ReflectionMethod;
@@ -21,12 +24,15 @@ use Shipfastlabs\Grant\Console\Commands\ListCommand;
 use Shipfastlabs\Grant\Console\Commands\ShowCommand;
 use Shipfastlabs\Grant\Console\Commands\SyncCommand;
 use Shipfastlabs\Grant\Doctrine\EntityManagerFactory;
+use Shipfastlabs\Grant\Entities\RoleAssignment;
 use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
 use Shipfastlabs\Grant\Internal\AssignmentMemo;
 use Shipfastlabs\Grant\Listeners\InjectGrantService;
 
 final class GrantServiceProvider extends ServiceProvider
 {
+    public const string ENTITY_MANAGER = 'grant.entity_manager';
+
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/grant.php', 'grant');
@@ -35,14 +41,28 @@ final class GrantServiceProvider extends ServiceProvider
         $this->app->scoped(Grant::class);
 
         $this->app->scoped(
-            EntityManagerInterface::class,
-            fn (Application $app): EntityManagerInterface => new EntityManagerFactory($this->config(), $app->make(AssignmentMemo::class))->make(),
+            self::ENTITY_MANAGER,
+            fn (Application $app): EntityManagerInterface => new EntityManagerFactory($this->config(), $app->make('db'), $app)->make(),
         );
 
+        $this->app->when(Grant::class)
+            ->needs(EntityManagerInterface::class)
+            ->give(fn (): EntityManagerInterface => $this->entityManager());
+
         $this->app->afterResolving(EntityManagerInterface::class, function (EntityManagerInterface $entityManager): void {
-            $entityManager->getEventManager()->addEventSubscriber(
-                new InjectGrantService(fn (): Grant => $this->app->make(Grant::class)),
-            );
+            $eventManager = $entityManager->getEventManager();
+            $subscribed = array_filter($eventManager->getListeners(Events::postLoad), static fn (object $listener): bool => $listener instanceof InjectGrantService);
+
+            if ($subscribed === []) {
+                $eventManager->addEventSubscriber(new InjectGrantService($this->app));
+            }
+        });
+
+        $this->app->booting(function (): void {
+            match ($this->app->bound(EntityManagerInterface::class)) {
+                true => null,
+                false => $this->app->alias(self::ENTITY_MANAGER, EntityManagerInterface::class),
+            };
         });
     }
 
@@ -51,10 +71,11 @@ final class GrantServiceProvider extends ServiceProvider
         $permissions = $this->config()->get('grant.permissions');
 
         if (is_string($permissions) && is_subclass_of($permissions, Ability::class)) {
-            $this->registerGate();
+            $this->registerGate($permissions);
         }
 
         $this->registerAuthProvider();
+        $this->forgetRolledBackAssignments();
 
         if ($this->app->runningInConsole()) {
             $this->registerCommands();
@@ -70,6 +91,31 @@ final class GrantServiceProvider extends ServiceProvider
         return $config;
     }
 
+    private function entityManager(): EntityManagerInterface
+    {
+        /** @var EntityManagerInterface $entityManager */
+        $entityManager = $this->app->make(self::ENTITY_MANAGER);
+
+        return $entityManager;
+    }
+
+    private function forgetRolledBackAssignments(): void
+    {
+        $this->app->make(Dispatcher::class)->listen(TransactionRolledBack::class, function (): void {
+            if (! $this->app->resolved(self::ENTITY_MANAGER)) {
+                return;
+            }
+
+            $entityManager = $this->entityManager();
+
+            foreach ($entityManager->getUnitOfWork()->getIdentityMap()[RoleAssignment::class] ?? [] as $assignment) {
+                $entityManager->detach($assignment);
+            }
+
+            $this->app->make(AssignmentMemo::class)->flush();
+        });
+    }
+
     private function registerAuthProvider(): void
     {
         $this->app->make(AuthManager::class)->provider('doctrine', function (Application $app, array $config): DoctrineUserProvider {
@@ -79,15 +125,15 @@ final class GrantServiceProvider extends ServiceProvider
                 throw InvalidConfigurationException::authModel();
             }
 
-            return new DoctrineUserProvider($app->make(EntityManagerInterface::class), $model, $app->make(Hasher::class));
+            return new DoctrineUserProvider($this->entityManager(), $model, $app->make(Hasher::class));
         });
     }
 
-    private function registerGate(): void
+    /** @param  class-string<Ability>  $permissions */
+    private function registerGate(string $permissions): void
     {
         /** @var Gate $gate */
         $gate = $this->app->make(Gate::class);
-        $permissions = $this->app->make(Grant::class)->permissionClass();
 
         $resolveGrant = fn (): Grant => $this->app->make(Grant::class);
 

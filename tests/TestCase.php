@@ -8,6 +8,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Tools\SchemaTool;
 use Illuminate\Foundation\Application;
+use Illuminate\Support\ServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 use RuntimeException;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
@@ -22,26 +23,15 @@ abstract class TestCase extends Orchestra
 {
     use InteractsWithGrant;
 
-    private ?string $testDatabase = null;
-
-    protected function tearDown(): void
-    {
-        if ($this->testDatabase !== null && is_file($this->testDatabase)) {
-            @unlink($this->testDatabase);
-        }
-
-        parent::tearDown();
-    }
+    /** @var list<class-string<ServiceProvider>> */
+    protected array $packageProviders = [GrantServiceProvider::class];
 
     protected function defineEnvironment($app): void
     {
-        $database = tempnam(sys_get_temp_dir(), 'grant-test-');
-        $this->testDatabase = is_string($database) ? $database : null;
-
         $app['config']->set('database.default', 'testing');
         $app['config']->set('database.connections.testing', [
             'driver' => 'sqlite',
-            'database' => $database,
+            'database' => ':memory:',
             'foreign_key_constraints' => true,
         ]);
         $app['config']->set('grant.entities', [__DIR__.'/Fixtures']);
@@ -54,6 +44,14 @@ abstract class TestCase extends Orchestra
         $app->useAppPath($sandbox.DIRECTORY_SEPARATOR.'app');
         $app->useConfigPath($sandbox.DIRECTORY_SEPARATOR.'config');
         $app->useDatabasePath($sandbox.DIRECTORY_SEPARATOR.'database');
+    }
+
+    /** @param  list<class-string<ServiceProvider>>  $providers */
+    protected function bootWithProviders(array $providers): void
+    {
+        $this->packageProviders = $providers;
+        $this->refreshApplication();
+        $this->defineDatabaseMigrations();
     }
 
     protected function defineDatabaseMigrations(): void
@@ -73,9 +71,7 @@ abstract class TestCase extends Orchestra
 
     protected function getPackageProviders($app): array
     {
-        return [
-            GrantServiceProvider::class,
-        ];
+        return $this->packageProviders;
     }
 
     protected function em(): EntityManagerInterface

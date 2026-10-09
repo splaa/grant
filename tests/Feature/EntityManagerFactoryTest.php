@@ -2,97 +2,112 @@
 
 declare(strict_types=1);
 
-use Illuminate\Contracts\Config\Repository;
+use Doctrine\ORM\EntityManagerInterface;
+use Illuminate\Database\Connection;
+use Illuminate\Support\Facades\DB;
 use Shipfastlabs\Grant\Doctrine\EntityManagerFactory;
-use Shipfastlabs\Grant\Internal\AssignmentMemo;
+use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
 
-/** @return array<string, mixed> */
-function grantConnectionParams(Repository $config): array
+function grantEntityManager(): EntityManagerInterface
 {
-    return new EntityManagerFactory($config, new AssignmentMemo)->make()->getConnection()->getParams();
+    return new EntityManagerFactory(config(), app('db'), app())->make();
 }
 
-it('enforces sqlite foreign keys when the Laravel connection enables them', function (bool $enabled, int $expected): void {
-    /** @var Repository $config */
-    $config = $this->app?->make(Repository::class);
-    $config->set('database.connections.testing.foreign_key_constraints', $enabled);
+it('runs Doctrine on the PDO of the Laravel connection', function (): void {
+    expect($this->em()->getConnection()->getNativeConnection())->toBe(DB::connection()->getPdo());
 
-    $connection = new EntityManagerFactory($config, new AssignmentMemo)->make()->getConnection();
+    DB::table('teams')->insert(['name' => 'Written by Laravel']);
 
-    expect((int) $connection->fetchOne('PRAGMA foreign_keys'))->toBe($expected);
-})->with([
-    'enabled' => [true, 1],
-    'disabled' => [false, 0],
-]);
+    expect($this->em()->getConnection()->fetchOne('SELECT name FROM teams'))->toBe('Written by Laravel');
+});
+
+it('rolls role assignments back with a Laravel transaction', function (): void {
+    $user = $this->createUser('Taylor');
+
+    DB::beginTransaction();
+    $user->grant(Role::Editor);
+
+    expect(DB::transactionLevel())->toBe(1)
+        ->and($user->hasRole(Role::Editor))->toBeTrue();
+
+    DB::rollBack();
+
+    expect($user->hasRole(Role::Editor))->toBeFalse();
+});
+
+it('commits a Doctrine transaction nested in a Laravel transaction only with the outer one', function (): void {
+    $user = $this->createUser('Taylor');
+
+    expect(fn () => DB::transaction(function () use ($user): void {
+        $user->syncRoles([Role::Editor, Role::Viewer]);
+
+        expect(DB::transactionLevel())->toBe(1);
+
+        throw new RuntimeException('Abort');
+    }))->toThrow(RuntimeException::class, 'Abort');
+
+    expect($user->roles())->toBeEmpty()
+        ->and(DB::transactionLevel())->toBe(0);
+
+    $user->syncRoles([Role::Viewer]);
+
+    expect(DB::transactionLevel())->toBe(0)
+        ->and((int) DB::table('role_assignments')->count())->toBe(1);
+});
+
+it('creates a user and grants a role inside one Laravel transaction', function (): void {
+    DB::transaction(function (): void {
+        $this->createUser('Taylor')->grant(Role::Admin);
+    });
+
+    expect((int) DB::table('role_assignments')->where('role', 'admin')->count())->toBe(1);
+});
 
 it('cascades role assignments when the user row is deleted outside Doctrine', function (): void {
     $user = $this->createUser('Taylor');
     $user->grant(Role::Editor);
 
-    $this->em()->getConnection()->executeStatement('DELETE FROM users WHERE id = ?', [$user->getId()]);
+    DB::table('users')->where('id', $user->getId())->delete();
 
-    expect((int) $this->em()->getConnection()->fetchOne('SELECT COUNT(*) FROM role_assignments'))->toBe(0);
+    expect((int) DB::table('role_assignments')->count())->toBe(0);
 });
 
-it('builds connection params from the configured Laravel connection', function (): void {
-    /** @var Repository $config */
-    $config = $this->app?->make(Repository::class);
-    $config->set('database.connections.reporting', [
-        'driver' => 'pgsql',
-        'host' => 'db.internal',
-        'port' => '5433',
-        'database' => 'reports',
-        'username' => 'grant',
-        'password' => 'secret',
-        'charset' => 'utf8',
-        'sslmode' => 'require',
-        'prefix' => '',
-        'options' => [PDO::ATTR_TIMEOUT => 5],
-    ]);
-    $config->set('grant.connection', 'reporting');
+it('uses the grant.connection connection, including one configured by url', function (): void {
+    $database = tempnam(sys_get_temp_dir(), 'grant-url-');
 
-    expect(grantConnectionParams($config))->toMatchArray([
-        'driver' => 'pdo_pgsql',
-        'host' => 'db.internal',
-        'port' => '5433',
-        'dbname' => 'reports',
-        'user' => 'grant',
-        'password' => 'secret',
-        'charset' => 'utf8',
-        'sslmode' => 'require',
-        'driverOptions' => [PDO::ATTR_TIMEOUT => 5],
+    config()->set('database.connections.reporting', [
+        'driver' => 'sqlite',
+        'url' => 'sqlite:///'.$database,
+        'database' => 'ignored.sqlite',
     ]);
+    config()->set('grant.connection', 'reporting');
+
+    try {
+        DB::connection('reporting')->statement('CREATE TABLE marker (id INTEGER)');
+
+        $connection = grantEntityManager()->getConnection();
+
+        expect($connection->getNativeConnection())->toBe(DB::connection('reporting')->getPdo())
+            ->and($connection->createSchemaManager()->tablesExist(['marker']))->toBeTrue();
+    } finally {
+        DB::purge('reporting');
+        @unlink((string) $database);
+    }
 });
 
-it('falls back to the default connection and honours a DB_URL style url', function (): void {
-    /** @var Repository $config */
-    $config = $this->app?->make(Repository::class);
-    $config->set('database.connections.primary', [
-        'driver' => 'mysql',
-        'url' => 'mysql://app:p%40ss@db.example:3307/shop',
-        'host' => '127.0.0.1',
-        'database' => 'laravel',
-    ]);
-    $config->set('database.default', 'primary');
-    $config->set('grant.connection');
+it('maps Laravel drivers to DBAL drivers without connecting', function (): void {
+    config()->set('database.connections.primary', ['driver' => 'pgsql', 'url' => 'pgsql://app:secret@db.example:5433/shop']);
+    config()->set('grant.connection', 'primary');
 
-    expect(grantConnectionParams($config))->toMatchArray([
-        'driver' => 'pdo_mysql',
-        'host' => 'db.example',
-        'port' => 3307,
-        'dbname' => 'shop',
-        'user' => 'app',
-        'password' => 'p@ss',
-    ]);
+    expect(grantEntityManager()->getConnection()->getParams())->toBe(['driver' => 'pdo_pgsql']);
 });
 
-it('uses an in-memory sqlite database when no file is configured', function (): void {
-    /** @var Repository $config */
-    $config = $this->app?->make(Repository::class);
-    $config->set('database.connections.memory', ['driver' => 'sqlite', 'database' => ':memory:']);
-    $config->set('grant.connection', 'memory');
+it('rejects a connection driver Doctrine cannot map', function (): void {
+    config()->set('database.connections.legacy', ['driver' => 'mongodb']);
+    config()->set('grant.connection', 'legacy');
+    DB::extend('legacy', fn (array $config, string $name): Connection => new Connection(fn (): PDO => new PDO('sqlite::memory:'), '', '', $config));
 
-    expect(grantConnectionParams($config))->toMatchArray(['driver' => 'pdo_sqlite', 'memory' => true])
-        ->not->toHaveKey('path');
+    expect(fn (): EntityManagerInterface => grantEntityManager())
+        ->toThrow(InvalidConfigurationException::class, '[mongodb]');
 });

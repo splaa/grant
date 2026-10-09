@@ -9,6 +9,7 @@ use Illuminate\Console\Command;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
 use Shipfastlabs\Grant\Entities\RoleAssignmentRepository;
 use Shipfastlabs\Grant\Grant;
+use Shipfastlabs\Grant\GrantServiceProvider;
 use Shipfastlabs\Grant\Role;
 
 use function Laravel\Prompts\select;
@@ -19,8 +20,10 @@ final class SyncCommand extends Command
 
     protected $description = 'Remap or delete stored roles that no longer match a case of the role enum.';
 
-    public function handle(Grant $grant, EntityManagerInterface $entityManager): int
+    public function handle(Grant $grant): int
     {
+        $entityManager = $this->entityManager();
+
         $roleClass = $grant->roleClass();
         $known = array_map(static fn (Role $role): string => $role->value, $roleClass::cases());
 
@@ -66,5 +69,13 @@ final class SyncCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    private function entityManager(): EntityManagerInterface
+    {
+        /** @var EntityManagerInterface $entityManager */
+        $entityManager = $this->laravel->make(GrantServiceProvider::ENTITY_MANAGER);
+
+        return $entityManager;
     }
 }

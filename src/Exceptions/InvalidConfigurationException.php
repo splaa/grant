@@ -36,6 +36,11 @@ final class InvalidConfigurationException extends GrantException
         return new self(sprintf('The dbmate migration cannot be generated for the [%s] database driver.', $driver));
     }
 
+    public static function connectionDriver(string $driver): self
+    {
+        return new self(sprintf('Grant cannot build a Doctrine connection for the [%s] database connection.', $driver));
+    }
+
     public static function authModel(): self
     {
         return new self('The [model] option of a [doctrine] auth provider must be a Doctrine entity class.');

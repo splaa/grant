@@ -4,19 +4,18 @@ declare(strict_types=1);
 
 namespace Shipfastlabs\Grant\Listeners;
 
-use Closure;
 use Doctrine\Common\EventSubscriber;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Event\PostLoadEventArgs;
 use Doctrine\ORM\Event\PostPersistEventArgs;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
+use Illuminate\Contracts\Container\Container;
 use Shipfastlabs\Grant\Grant;
 
 final readonly class InjectGrantService implements EventSubscriber
 {
-    /** @param  Closure(): Grant  $grant */
-    public function __construct(private Closure $grant) {}
+    public function __construct(private Container $container) {}
 
     /** @return list<string> */
     public function getSubscribedEvents(): array
@@ -40,7 +39,7 @@ final readonly class InjectGrantService implements EventSubscriber
         $injector = [$args->getObject(), 'injectGrantService'];
 
         if (is_callable($injector)) {
-            $injector(($this->grant)());
+            $injector($this->container->make(Grant::class));
         }
     }
 }

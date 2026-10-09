@@ -10,6 +10,8 @@ CREATE TABLE role_assignments (
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX role_assignments_user_id_index ON role_assignments (user_id);
+CREATE UNIQUE INDEX role_assignments_user_role_global_unique
+    ON role_assignments (user_id, role) WHERE scopeable_type IS NULL;
 
 -- migrate:down
 DROP TABLE IF EXISTS role_assignments;
