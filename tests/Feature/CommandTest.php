@@ -8,6 +8,20 @@ use Shipfastlabs\Grant\Tests\Fixtures\Team;
 
 use function Orchestra\Testbench\default_skeleton_path;
 
+afterEach(function (): void {
+    $migrationDirectory = base_path('db/migrations');
+
+    @unlink(config_path('grant.php'));
+    array_map(unlink(...), glob($migrationDirectory.'/*_create_role_assignments.sql') ?: []);
+    @rmdir($migrationDirectory);
+});
+
+/** @return list<string> */
+function grantInstalledMigrations(): array
+{
+    return array_values(glob(base_path('db/migrations').'/*_create_role_assignments.sql') ?: []);
+}
+
 it('lists registered permission abilities', function (): void {
     $this->artisan('grant:list')
         ->expectsTable(
@@ -111,4 +125,84 @@ it('installs the config, dbmate migration, and starter enums', function (): void
         array_map(unlink(...), glob($migrationDirectory.'/*_create_role_assignments.sql') ?: []);
         @rmdir($migrationDirectory);
     }
+});
+
+it('renders the migration for the grant connection driver, not the default one', function (): void {
+    config()->set('database.connections.reporting', ['driver' => 'pgsql', 'database' => 'reports']);
+    config()->set('grant.connection', 'reporting');
+
+    $this->artisan('grant:install')->assertSuccessful();
+
+    expect(grantInstalledMigrations())->toHaveCount(1)
+        ->and(file_get_contents(grantInstalledMigrations()[0]))
+        ->toContain('id BIGSERIAL PRIMARY KEY')
+        ->toContain('user_id BIGINT NOT NULL');
+});
+
+it('does not write a second migration when grant:install runs again', function (): void {
+    $this->artisan('grant:install')->assertSuccessful();
+    $first = grantInstalledMigrations();
+
+    $this->artisan('grant:install')
+        ->expectsOutputToContain('already exists; use --force to overwrite.')
+        ->assertSuccessful();
+
+    expect(grantInstalledMigrations())->toBe($first);
+
+    $this->artisan('grant:install', ['--force' => true, '--key-type' => 'uuid'])->assertSuccessful();
+
+    expect(grantInstalledMigrations())->toBe($first)
+        ->and(file_get_contents($first[0]))->toContain('user_id VARCHAR(36) NOT NULL');
+});
+
+it('writes the chosen key type into the migration and the published config', function (): void {
+    $this->artisan('grant:install', ['--key-type' => 'ulid'])->assertSuccessful();
+
+    expect(file_get_contents(config_path('grant.php')))->toContain("'key_type' => 'ulid'")
+        ->and(file_get_contents(grantInstalledMigrations()[0]))
+        ->toContain('user_id VARCHAR(26) NOT NULL')
+        ->toContain('scopeable_id VARCHAR(26) NULL');
+
+    $this->artisan('grant:install', ['--force' => true, '--key-type' => 'int'])->assertSuccessful();
+
+    expect(file_get_contents(config_path('grant.php')))->toContain("'key_type' => 'int'");
+});
+
+it('defaults the key type to the configured grant.key_type', function (): void {
+    config()->set('grant.key_type', 'uuid');
+
+    $this->artisan('grant:install')->assertSuccessful();
+
+    expect(file_get_contents(grantInstalledMigrations()[0]))->toContain('user_id VARCHAR(36) NOT NULL');
+});
+
+it('fails on an unknown key type or an unsupported database driver', function (): void {
+    $this->artisan('grant:install', ['--key-type' => 'bigint'])
+        ->expectsOutputToContain('must be one of: int, uuid, ulid')
+        ->assertFailed();
+
+    config()->set('database.connections.legacy', ['driver' => 'sqlsrv']);
+    config()->set('grant.connection', 'legacy');
+
+    $this->artisan('grant:install')
+        ->expectsOutputToContain('[sqlsrv] database driver')
+        ->assertFailed();
+
+    expect(grantInstalledMigrations())->toBeEmpty();
+});
+
+it('reports a missing user or a malformed scope in grant:show', function (): void {
+    $this->artisan('grant:show', ['user' => '999'])
+        ->expectsOutputToContain('with id [999] was found')
+        ->assertFailed();
+
+    $user = $this->createUser('Taylor');
+
+    $this->artisan('grant:show', ['user' => (string) $user->getId(), '--on' => 'Team'])
+        ->expectsOutputToContain('must use EntityClass:id')
+        ->assertFailed();
+
+    $this->artisan('grant:show', ['user' => (string) $user->getId(), '--on' => Team::class.':999'])
+        ->expectsOutputToContain('No scope')
+        ->assertFailed();
 });

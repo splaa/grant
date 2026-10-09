@@ -16,7 +16,7 @@ final class InstallCommand extends Command
 {
     protected $signature = 'grant:install
         {--force : Overwrite published config, dbmate migration, and enums}
-        {--key-type=int : User key type: int, uuid, or ulid}
+        {--key-type= : User key type: int, uuid, or ulid (defaults to grant.key_type)}
         {--migrate : Run dbmate up when the dbmate binary is available}';
 
     protected $description = 'Install Grant configuration, dbmate migration, and enums.';
@@ -71,7 +71,7 @@ final class InstallCommand extends Command
 
         $this->components->info('Grant installed successfully.');
         $this->components->bulletList([
-            'Add `Shipfastlabs\Grant\HasRoles` to your Doctrine user entity.',
+            'Add `Shipfastlabs\Grant\HasRoles`, `Shipfastlabs\Grant\Auth\Authenticatable`, and Laravel\'s `Authorizable` to your Doctrine user entity.',
             'Set `auth.providers.users.model` to that entity and `auth.providers.users.driver` to `doctrine`.',
             'Run `dbmate up` to create the role_assignments table.',
         ]);
@@ -81,7 +81,7 @@ final class InstallCommand extends Command
 
     private function resolveKeyType(): ?string
     {
-        $keyType = $this->option('key-type');
+        $keyType = $this->option('key-type') ?? $this->config->get('grant.key_type', 'int');
 
         if (! is_string($keyType) || ! isset(self::TYPES['sqlite'][$keyType])) {
             $this->components->error('The --key-type option must be one of: int, uuid, ulid.');
@@ -94,15 +94,15 @@ final class InstallCommand extends Command
 
     private function resolveDriver(): ?string
     {
-        $connection = $this->config->get('database.default', 'mysql');
+        $connection = $this->config->get('grant.connection');
+        $connection = is_string($connection) && $connection !== '' ? $connection : $this->config->get('database.default', 'mysql');
         $connection = is_string($connection) ? $connection : 'mysql';
 
         $driver = $this->config->get("database.connections.{$connection}.driver", $connection);
-        $driver = is_string($driver) ? $driver : $connection;
-
-        if ($driver === 'mariadb') {
-            $driver = 'mysql';
-        }
+        $driver = match ($driver) {
+            'mariadb' => 'mysql',
+            default => is_string($driver) ? $driver : $connection,
+        };
 
         if (! isset(self::TYPES[$driver])) {
             $this->components->error(InvalidConfigurationException::driver($driver)->getMessage());
@@ -117,17 +117,16 @@ final class InstallCommand extends Command
     {
         $path = config_path('grant.php');
 
-        if ($keyType === 'int' || ! $files->exists($path)) {
+        if (! $files->exists($path)) {
             return;
         }
 
         $contents = $files->get($path);
+        $updated = preg_replace("/'key_type' => '[^']*'/", "'key_type' => '{$keyType}'", $contents, 1);
 
-        if (! str_contains($contents, "'key_type' => 'int'")) {
-            return;
+        if (is_string($updated) && $updated !== $contents) {
+            $files->put($path, $updated);
         }
-
-        $files->put($path, str_replace("'key_type' => 'int'", "'key_type' => '{$keyType}'", $contents));
     }
 
     private function writeMigration(Filesystem $files, string $driver, string $keyType): void
@@ -136,13 +135,17 @@ final class InstallCommand extends Command
         [$key, $keyNullable] = self::TYPES[$driver][$keyType];
         $sql = str_replace(['{{key}}', '{{key_nullable}}'], [$key, $keyNullable], $sql);
 
-        $path = $this->migrationDirectory().'/'.date('YmdHis').'_create_role_assignments.sql';
+        $directory = $this->migrationDirectory();
+        $existing = $files->glob($directory.'/*_create_role_assignments.sql')[0] ?? null;
+        $existing = is_string($existing) ? $existing : null;
 
-        if ($files->exists($path) && ! $this->option('force')) {
-            $this->components->warn("Migration [{$path}] already exists; use --force to overwrite.");
+        if ($existing !== null && ! $this->option('force')) {
+            $this->components->warn("Migration [{$existing}] already exists; use --force to overwrite.");
 
             return;
         }
+
+        $path = $existing ?? $directory.'/'.date('YmdHis').'_create_role_assignments.sql';
 
         $files->ensureDirectoryExists(dirname($path));
         $files->put($path, $sql);

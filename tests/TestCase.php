@@ -60,7 +60,6 @@ abstract class TestCase extends Orchestra
     {
         $entityManager = $this->em();
         $connection = $entityManager->getConnection();
-        $connection->executeStatement('PRAGMA foreign_keys = ON');
 
         $metadata = array_values(array_filter(
             $entityManager->getMetadataFactory()->getAllMetadata(),

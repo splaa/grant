@@ -9,7 +9,8 @@
         "permissions",
         "gate",
         "enum",
-        "acl"
+        "acl",
+        "doctrine"
     ],
     "homepage": "https://github.com/shipfastlabs/grant",
     "license": "MIT",
@@ -31,7 +32,7 @@
         "larastan/larastan": "^3.9",
         "laravel/pao": "^1.0",
         "laravel/pint": "^1.29",
-        "orchestra/testbench": "^10.0||^11.0",
+        "orchestra/testbench": "^11.0",
         "pestphp/pest": "^4.6||^5.0",
         "pestphp/pest-plugin-laravel": "^4.1||^5.0",
         "pestphp/pest-plugin-type-coverage": "^4.0||^5.0",

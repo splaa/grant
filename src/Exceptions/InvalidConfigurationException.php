@@ -38,6 +38,6 @@ final class InvalidConfigurationException extends GrantException
 
     public static function authModel(): self
     {
-        return new self('The [auth.providers.users.model] config value must be a Doctrine entity class.');
+        return new self('The [model] option of a [doctrine] auth provider must be a Doctrine entity class.');
     }
 }
