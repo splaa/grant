@@ -2,11 +2,13 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\GenericUser;
 use Illuminate\Support\Facades\Gate;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
 use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
 use Shipfastlabs\Grant\Exceptions\UnsavedEntityException;
 use Shipfastlabs\Grant\Facades\Grant;
+use Shipfastlabs\Grant\Scope;
 use Shipfastlabs\Grant\Tests\Fixtures\Permission;
 use Shipfastlabs\Grant\Tests\Fixtures\Post;
 use Shipfastlabs\Grant\Tests\Fixtures\Role;
@@ -183,4 +185,90 @@ it('rejects a super admin that is not a case of the role enum', function (): voi
 
     expect(fn () => Gate::forUser($user)->allows(Permission::EditPosts))
         ->toThrow(InvalidConfigurationException::class, 'grant.super_admin');
+});
+
+it('refuses role calls on entities Doctrine does not manage yet', function (): void {
+    $user = new User('Unsaved');
+
+    expect(fn (): bool => $user->hasRole(Role::Admin))
+        ->toThrow(UnsavedEntityException::class, 'persisted or loaded through Doctrine')
+        ->and(fn () => Grant::grant($user, Role::Admin))
+        ->toThrow(UnsavedEntityException::class, 'persisted entities');
+});
+
+it('resolves roles on lazily loaded references and after the identity map is cleared', function (): void {
+    $user = $this->createUser('Taylor');
+    $user->grant(Role::Editor);
+
+    $id = $user->getId();
+
+    $this->em()->clear();
+
+    $reference = $this->em()->getReference(User::class, $id);
+    $reloaded = $this->em()->getRepository(User::class)->findOneBy(['name' => 'Taylor']);
+
+    expect($reference?->hasRole(Role::Editor))->toBeTrue()
+        ->and($reloaded?->can(Permission::EditPosts))->toBeTrue();
+});
+
+it('denies guests and non-entity users instead of throwing', function (): void {
+    expect(Gate::allows(Permission::ViewReports))->toBeFalse()
+        ->and(Gate::forUser(new GenericUser(['id' => 1]))->allows(Permission::ViewReports))->toBeFalse();
+});
+
+it('only lets a globally granted super admin bypass the Gate', function (): void {
+    config()->set('grant.super_admin', Role::Admin);
+    $user = $this->createUser('Taylor');
+    $team = $this->createTeam('Laravel');
+    $user->grant(Role::Admin, on: $team);
+
+    expect(Gate::forUser($user)->allows('undefined-ability'))->toBeFalse()
+        ->and(Gate::forUser($user)->allows(Permission::ViewReports, $team))->toBeTrue()
+        ->and(Gate::forUser($user)->allows(Permission::ViewReports))->toBeFalse();
+});
+
+it('ignores stored roles without a matching enum case', function (): void {
+    $user = $this->createUser('Taylor');
+    $user->grant(Role::Viewer);
+
+    $this->em()->persist(new RoleAssignment((int) $user->getId(), 'retired-role'));
+    $this->em()->flush();
+
+    expect($user->roles()->all())->toBe([Role::Viewer])
+        ->and($user->roleAssignments())->toHaveCount(2);
+});
+
+it('rejects role and permission config values that are not string-backed enums', function (string $key): void {
+    config()->set("grant.{$key}", stdClass::class);
+    $user = $this->createUser('Taylor');
+
+    expect(fn (): string => match ($key) {
+        'roles' => Grant::roles($user)->toJson(),
+        'permissions' => Grant::permissionClass(),
+    })->toThrow(InvalidConfigurationException::class, "grant.{$key}");
+})->with(['roles', 'permissions']);
+
+it('treats scopes of different entity types with the same id as distinct', function (): void {
+    $user = $this->createUser('Taylor');
+    $team = $this->createTeam('Laravel');
+
+    $scope = new readonly class((int) $team->getId()) implements Scope
+    {
+        public function __construct(private int $id) {}
+
+        public function scopeType(): string
+        {
+            return 'project';
+        }
+
+        public function scopeId(): int
+        {
+            return $this->id;
+        }
+    };
+
+    $user->grant(Role::Editor, on: $team);
+
+    expect($user->roles($team)->all())->toBe([Role::Editor])
+        ->and(Grant::roles($user, $scope))->toBeEmpty();
 });

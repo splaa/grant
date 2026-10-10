@@ -8,6 +8,7 @@ use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity(repositoryClass: RoleAssignmentRepository::class)]
 #[ORM\Table(name: 'role_assignments')]
+#[ORM\Index(name: 'role_assignments_user_id_index', columns: ['user_id'])]
 #[ORM\UniqueConstraint(
     name: 'role_assignments_user_role_scope_unique',
     columns: ['user_id', 'role', 'scopeable_type', 'scopeable_id'],
@@ -15,7 +16,7 @@ use Doctrine\ORM\Mapping as ORM;
 class RoleAssignment
 {
     #[ORM\Id]
-    #[ORM\Column(type: 'integer')]
+    #[ORM\Column(type: 'bigint', options: ['unsigned' => true])]
     #[ORM\GeneratedValue]
     private ?int $id = null;
 
@@ -26,7 +27,7 @@ class RoleAssignment
         private string $role,
         #[ORM\Column(name: 'scopeable_type', type: 'string', nullable: true)]
         private ?string $scopeableType = null,
-        #[ORM\Column(name: 'scopeable_id', type: 'string', nullable: true)]
+        #[ORM\Column(name: 'scopeable_id', type: 'integer', nullable: true)]
         private int|string|null $scopeableId = null
     ) {}
 

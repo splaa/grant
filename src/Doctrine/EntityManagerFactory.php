@@ -9,14 +9,24 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Events;
 use Doctrine\ORM\Mapping\Driver\AttributeDriver;
+use Doctrine\ORM\Tools\ToolEvents;
+use Doctrine\Persistence\Mapping\Driver\MappingDriver;
+use Doctrine\Persistence\Mapping\Driver\MappingDriverChain;
 use Illuminate\Contracts\Config\Repository;
-use Shipfastlabs\Grant\Internal\AssignmentMemo;
+use Illuminate\Contracts\Container\Container;
+use Illuminate\Database\Connection;
+use Illuminate\Database\ConnectionResolverInterface;
+use Shipfastlabs\Grant\Exceptions\InvalidConfigurationException;
 use Shipfastlabs\Grant\Listeners\ConfigureRoleAssignmentMapping;
 use Shipfastlabs\Grant\Listeners\FlushGrantMemo;
+use Shipfastlabs\Grant\Listeners\InjectGrantService;
 
 final readonly class EntityManagerFactory
 {
+    private const string ENTITY_NAMESPACE = 'Shipfastlabs\\Grant\\Entities';
+
     /** @var array<string, string> */
     private const array DBAL_DRIVERS = [
         'mysql' => 'pdo_mysql',
@@ -28,23 +38,73 @@ final readonly class EntityManagerFactory
 
     public function __construct(
         private Repository $config,
-        private AssignmentMemo $memo,
+        private ConnectionResolverInterface $connections,
+        private Container $container,
     ) {}
 
     public function make(): EntityManagerInterface
     {
+        $connection = $this->connection();
+
         $configuration = new Configuration;
         $configuration->setMetadataDriverImpl(new AttributeDriver($this->paths()));
         $configuration->enableNativeLazyObjects(true);
+        $configuration->setMiddlewares([new LaravelConnectionMiddleware($connection)]);
 
-        $eventManager = new EventManager;
+        $driver = $connection->getDriverName();
+
+        $dbal = DriverManager::getConnection(
+            ['driver' => self::DBAL_DRIVERS[$driver] ?? throw InvalidConfigurationException::connectionDriver($driver)],
+            $configuration,
+        );
+
+        return $this->attach(new EntityManager($dbal, $configuration, new EventManager));
+    }
+
+    public function attach(EntityManagerInterface $entityManager): EntityManagerInterface
+    {
+        $eventManager = $entityManager->getEventManager();
+        $attached = array_filter(
+            $eventManager->getListeners(ToolEvents::postGenerateSchema),
+            static fn (object $listener): bool => $listener instanceof ConfigureRoleAssignmentMapping,
+        );
+
+        if ($attached !== []) {
+            return $entityManager;
+        }
+
+        $configuration = $entityManager->getConfiguration();
+        $configuration->setMetadataDriverImpl($this->withGrantEntities($configuration->getMetadataDriverImpl()));
+
         $eventManager->addEventSubscriber(new ConfigureRoleAssignmentMapping($this->config));
-        $eventManager->addEventSubscriber(new FlushGrantMemo($this->memo));
+        $eventManager->addEventSubscriber(new FlushGrantMemo($this->container));
 
-        // @phpstan-ignore argument.type (params are validated by DBAL at runtime)
-        $connection = DriverManager::getConnection($this->connectionParams($this->connection()));
+        $injected = array_filter(
+            $eventManager->getListeners(Events::postLoad),
+            static fn (object $listener): bool => $listener instanceof InjectGrantService,
+        );
 
-        return new EntityManager($connection, $configuration, $eventManager);
+        if ($injected === []) {
+            $eventManager->addEventSubscriber(new InjectGrantService($this->container));
+        }
+
+        return $entityManager;
+    }
+
+    private function withGrantEntities(?MappingDriver $driver): MappingDriverChain
+    {
+        $chain = match (true) {
+            $driver instanceof MappingDriverChain => $driver,
+            default => new MappingDriverChain,
+        };
+
+        if ($driver instanceof MappingDriver && $chain !== $driver) {
+            $chain->setDefaultDriver($driver);
+        }
+
+        $chain->addDriver(new AttributeDriver([__DIR__.'/../Entities']), self::ENTITY_NAMESPACE);
+
+        return $chain;
     }
 
     /** @return list<string> */
@@ -52,7 +112,6 @@ final readonly class EntityManagerFactory
     {
         $paths = $this->config->get('grant.entities', []);
         $paths = is_array($paths) ? $paths : [];
-        $paths[] = __DIR__.'/../Entities';
 
         return array_values(array_unique(array_filter(
             $paths,
@@ -60,63 +119,14 @@ final readonly class EntityManagerFactory
         )));
     }
 
-    /** @return array<string, mixed> */
-    private function connection(): array
+    private function connection(): Connection
     {
         $name = $this->config->get('grant.connection');
-        $name = is_string($name) && $name !== '' ? $name : $this->config->get('database.default', 'mysql');
-        $name = is_string($name) ? $name : 'mysql';
+        $connection = $this->connections->connection(is_string($name) && $name !== '' ? $name : null);
 
-        /** @var array<string, mixed> $connection */
-        $connection = $this->config->get("database.connections.{$name}", []);
-
-        return $connection;
-    }
-
-    /**
-     * @param  array<string, mixed>  $connection
-     * @return array<string, mixed>
-     */
-    private function connectionParams(array $connection): array
-    {
-        $driver = $connection['driver'] ?? 'mysql';
-        $driver = is_string($driver) ? $driver : 'mysql';
-
-        $params = ['driver' => self::DBAL_DRIVERS[$driver] ?? $driver];
-
-        if ($driver === 'sqlite') {
-            $database = $connection['database'] ?? ':memory:';
-            $database = is_string($database) && $database !== '' ? $database : ':memory:';
-
-            if ($database === ':memory:') {
-                $params['memory'] = true;
-
-                return $params;
-            }
-
-            $params['path'] = $database;
-
-            return $params;
-        }
-
-        $keys = ['host' => 'host', 'port' => 'port', 'database' => 'dbname', 'username' => 'user', 'password' => 'password', 'charset' => 'charset', 'sslmode' => 'sslmode', 'unix_socket' => 'unix_socket'];
-
-        foreach ($keys as $from => $to) {
-            $value = $connection[$from] ?? null;
-
-            if ($value === null || $value === '') {
-                continue;
-            }
-
-            $params[$to] = $value;
-        }
-
-        $options = $connection['options'] ?? null;
-
-        if (is_array($options) && $options !== []) {
-            $params['driverOptions'] = $options;
-        }
-
-        return $params;
+        return match (true) {
+            $connection instanceof Connection => $connection,
+            default => throw InvalidConfigurationException::connectionDriver($connection::class),
+        };
     }
 }

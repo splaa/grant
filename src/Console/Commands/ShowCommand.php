@@ -10,6 +10,7 @@ use Illuminate\Contracts\Config\Repository;
 use Illuminate\Support\Collection;
 use Shipfastlabs\Grant\Ability;
 use Shipfastlabs\Grant\Grant;
+use Shipfastlabs\Grant\GrantServiceProvider;
 use Shipfastlabs\Grant\Role;
 use Shipfastlabs\Grant\Scope;
 
@@ -26,8 +27,10 @@ final class ShowCommand extends Command
         parent::__construct();
     }
 
-    public function handle(Grant $grant, EntityManagerInterface $entityManager): int
+    public function handle(Grant $grant): int
     {
+        $entityManager = $this->entityManager();
+
         $userClass = $this->config->get('auth.providers.users.model');
 
         if (! is_string($userClass) || ! class_exists($userClass)) {
@@ -95,5 +98,13 @@ final class ShowCommand extends Command
         }
 
         return $resolved;
+    }
+
+    private function entityManager(): EntityManagerInterface
+    {
+        /** @var EntityManagerInterface $entityManager */
+        $entityManager = $this->laravel->make(GrantServiceProvider::ENTITY_MANAGER);
+
+        return $entityManager;
     }
 }

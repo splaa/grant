@@ -75,6 +75,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Entity Manager
+    |--------------------------------------------------------------------------
+    |
+    | Leave this null to let Grant build its own EntityManager. To share an
+    | EntityManager your application already registers, set a manager name
+    | from the Doctrine ManagerRegistry (such as "default" with
+    | laravel-doctrine/orm) or a container key such as "em".
+    |
+    */
+
+    'entity_manager' => env('GRANT_ENTITY_MANAGER'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Key Type
     |--------------------------------------------------------------------------
     |

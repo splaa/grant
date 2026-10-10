@@ -8,6 +8,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Tools\SchemaTool;
 use Illuminate\Foundation\Application;
+use Illuminate\Support\ServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 use RuntimeException;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
@@ -22,26 +23,18 @@ abstract class TestCase extends Orchestra
 {
     use InteractsWithGrant;
 
-    private ?string $testDatabase = null;
+    /** @var list<class-string<ServiceProvider>> */
+    protected array $packageProviders = [GrantServiceProvider::class];
 
-    protected function tearDown(): void
-    {
-        if ($this->testDatabase !== null && is_file($this->testDatabase)) {
-            @unlink($this->testDatabase);
-        }
-
-        parent::tearDown();
-    }
+    /** @var array<string, mixed> */
+    protected array $configOverrides = [];
 
     protected function defineEnvironment($app): void
     {
-        $database = tempnam(sys_get_temp_dir(), 'grant-test-');
-        $this->testDatabase = is_string($database) ? $database : null;
-
         $app['config']->set('database.default', 'testing');
         $app['config']->set('database.connections.testing', [
             'driver' => 'sqlite',
-            'database' => $database,
+            'database' => ':memory:',
             'foreign_key_constraints' => true,
         ]);
         $app['config']->set('grant.entities', [__DIR__.'/Fixtures']);
@@ -54,13 +47,71 @@ abstract class TestCase extends Orchestra
         $app->useAppPath($sandbox.DIRECTORY_SEPARATOR.'app');
         $app->useConfigPath($sandbox.DIRECTORY_SEPARATOR.'config');
         $app->useDatabasePath($sandbox.DIRECTORY_SEPARATOR.'database');
+
+        foreach ($this->configOverrides as $key => $value) {
+            $app['config']->set($key, $value);
+        }
+    }
+
+    /**
+     * @param  list<class-string<ServiceProvider>>  $providers
+     * @param  array<string, mixed>  $config
+     */
+    protected function bootWithProviders(array $providers, array $config = []): void
+    {
+        $this->packageProviders = $providers;
+        $this->configOverrides = $config;
+        $this->refreshApplication();
+        $this->defineDatabaseMigrations();
+    }
+
+    /**
+     * @param  array<string, mixed>  $config
+     * @param  list<class-string<ServiceProvider>>  $providers
+     */
+    public function refreshWithConfig(array $config, array $providers = [GrantServiceProvider::class]): void
+    {
+        $this->packageProviders = $providers;
+        $this->configOverrides = $config;
+        $this->refreshApplication();
+    }
+
+    /**
+     * @param  list<string>  $managers
+     * @return array<string, mixed>
+     */
+    public function laravelDoctrineConfig(string $database, array $managers = ['default']): array
+    {
+        touch($database);
+
+        $manager = [
+            'dev' => true,
+            'meta' => 'attributes',
+            'connection' => 'testing',
+            'paths' => [__DIR__.'/Fixtures'],
+            'proxies' => ['namespace' => 'DoctrineProxies', 'path' => sys_get_temp_dir(), 'auto_generate' => true],
+            'events' => ['listeners' => [], 'subscribers' => []],
+            'filters' => [],
+            'mapping_types' => [],
+            'middlewares' => [],
+        ];
+
+        return [
+            'database.connections.testing' => [
+                'driver' => 'sqlite',
+                'database' => $database,
+                'foreign_key_constraints' => true,
+            ],
+            'doctrine.managers' => array_fill_keys($managers, $manager),
+            'auth.providers.users.driver' => 'doctrine',
+            'grant.entity_manager' => 'default',
+        ];
     }
 
     protected function defineDatabaseMigrations(): void
     {
         $entityManager = $this->em();
         $connection = $entityManager->getConnection();
-        $connection->executeStatement('PRAGMA foreign_keys = ON');
 
         $metadata = array_values(array_filter(
             $entityManager->getMetadataFactory()->getAllMetadata(),
@@ -74,9 +125,7 @@ abstract class TestCase extends Orchestra
 
     protected function getPackageProviders($app): array
     {
-        return [
-            GrantServiceProvider::class,
-        ];
+        return $this->packageProviders;
     }
 
     protected function em(): EntityManagerInterface

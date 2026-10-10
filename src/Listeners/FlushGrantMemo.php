@@ -11,12 +11,13 @@ use Doctrine\ORM\Event\PostRemoveEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
+use Illuminate\Contracts\Container\Container;
 use Shipfastlabs\Grant\Entities\RoleAssignment;
 use Shipfastlabs\Grant\Internal\AssignmentMemo;
 
 final readonly class FlushGrantMemo implements EventSubscriber
 {
-    public function __construct(private AssignmentMemo $memo) {}
+    public function __construct(private Container $container) {}
 
     /** @return list<string> */
     public function getSubscribedEvents(): array
@@ -50,10 +51,12 @@ final readonly class FlushGrantMemo implements EventSubscriber
 
         $change = $args->getObjectManager()->getUnitOfWork()->getEntityChangeSet($entity)['userId'] ?? null;
 
+        $memo = $this->container->make(AssignmentMemo::class);
+
         if (is_array($change) && (is_int($change[0]) || is_string($change[0]))) {
-            $this->memo->forget($change[0]);
+            $memo->forget($change[0]);
         }
 
-        $this->memo->forget($entity->getUserId());
+        $memo->forget($entity->getUserId());
     }
 }
